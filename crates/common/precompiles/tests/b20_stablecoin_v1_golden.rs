@@ -1199,6 +1199,28 @@ fn golden_permit_reverts_when_expired() {
     assert_eq!(err, BasePrecompileError::revert(IB20::ExpiredSignature { deadline: u(10) }));
 }
 
+/// Beryl `permit` stays unmetered: no native keccak or recovery gas, valid or invalid signature.
+#[test]
+fn golden_permit_is_unmetered_at_beryl() {
+    let owner = anvil_owner();
+    for tamper in [false, true] {
+        let mut s = fresh();
+        let domain = domain_separator(&mut s);
+        let mut call = signed_permit(domain, U256::ZERO, owner, BOB, u(500), U256::MAX);
+        if tamper {
+            call.v = 26;
+        }
+        s.set_timestamp(U256::ZERO);
+        s.reset_counters();
+        let gas_before = s.gas_deducted();
+        let result = op(&mut s, owner, FakePolicyAccounting::new(), call.abi_encode());
+
+        assert_eq!(result.is_err(), tamper);
+        assert_eq!(s.counter_keccak256(), 0);
+        assert_eq!(s.gas_deducted(), gas_before);
+    }
+}
+
 // ============================================================================
 // computed reads
 // ============================================================================

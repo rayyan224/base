@@ -1,7 +1,7 @@
 //! `TokenAccounting` — the driven port all token storage adapters implement.
 use alloc::string::String;
 
-use alloy_primitives::{Address, B256, LogData, U256};
+use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use base_precompile_storage::Result;
 
 /// Maximum total supply for a B-20 token.
@@ -141,6 +141,24 @@ pub trait TokenAccounting {
 
     /// Publishes a pre-encoded EVM event log from this token's address.
     fn emit_event(&mut self, log: LogData) -> Result<()>;
+
+    // --- Native gas metering ---
+
+    /// Computes `keccak256(data)` and charges the native `KECCAK256` gas for it.
+    ///
+    /// Used only by logic versions that meter their hashing (`permit` from Cobalt). The default
+    /// hashes without charging, for in-memory test doubles; EVM-backed adapters override it to
+    /// charge through the active storage context.
+    fn metered_keccak256(&self, data: &[u8]) -> Result<B256> {
+        Ok(keccak256(data))
+    }
+
+    /// Charges `gas` of native precompile gas, failing with out-of-gas when exhausted.
+    ///
+    /// The default charges nothing, for in-memory test doubles; EVM-backed adapters override it.
+    fn charge_gas(&self, _gas: u64) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
