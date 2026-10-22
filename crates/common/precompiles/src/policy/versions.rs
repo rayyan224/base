@@ -14,8 +14,9 @@ use base_common_genesis::BaseUpgrade;
 use base_precompile_storage::{BasePrecompileError, Result};
 
 use crate::{
-    IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3, PolicyAccounting,
-    PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3,
+    IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3, IPolicyRegistryV4,
+    PolicyAccounting, PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3,
+    PolicyRegistryV4,
 };
 
 /// An activated version of the `PolicyRegistry` precompile logic.
@@ -29,6 +30,8 @@ pub enum PolicyVersion {
     V2,
     /// Introduced at Denim, superseding [`Self::V2`].
     V3,
+    /// Introduced at Everest, superseding [`Self::V3`].
+    V4,
 }
 
 impl PolicyVersion {
@@ -40,10 +43,12 @@ impl PolicyVersion {
         static V1: PolicyRegistryV1 = PolicyRegistryV1;
         static V2: PolicyRegistryV2 = PolicyRegistryV2;
         static V3: PolicyRegistryV3 = PolicyRegistryV3;
+        static V4: PolicyRegistryV4 = PolicyRegistryV4;
         match self {
             Self::V1 => &V1,
             Self::V2 => &V2,
             Self::V3 => &V3,
+            Self::V4 => &V4,
         }
     }
     /// Returns the wire (ABI) surface frozen for this version.
@@ -52,6 +57,7 @@ impl PolicyVersion {
             Self::V1 => PolicyAbi::V1,
             Self::V2 => PolicyAbi::V2,
             Self::V3 => PolicyAbi::V3,
+            Self::V4 => PolicyAbi::V4,
         }
     }
 }
@@ -65,6 +71,8 @@ pub enum PolicyAbi {
     V2,
     /// Wire surface activated at Denim.
     V3,
+    /// Wire surface activated at Everest.
+    V4,
 }
 
 impl PolicyAbi {
@@ -74,6 +82,7 @@ impl PolicyAbi {
             Self::V1 => IPolicyRegistryV1::IPolicyRegistryCalls::valid_selector(selector),
             Self::V2 => IPolicyRegistryV2::IPolicyRegistryCalls::valid_selector(selector),
             Self::V3 => IPolicyRegistryV3::IPolicyRegistryCalls::valid_selector(selector),
+            Self::V4 => IPolicyRegistryV4::IPolicyRegistryCalls::valid_selector(selector),
         }
     }
 
@@ -89,6 +98,9 @@ impl PolicyAbi {
             }
             Self::V3 => {
                 IPolicyRegistryV3::IPolicyRegistryCalls::abi_decode_validate(calldata).map(|_| ())
+            }
+            Self::V4 => {
+                IPolicyRegistryV4::IPolicyRegistryCalls::abi_decode_validate(calldata).map(|_| ())
             }
         }
         .map_err(|error| BasePrecompileError::AbiDecodeFailed {
@@ -111,7 +123,7 @@ impl PolicyAbi {
         }
         match self {
             Self::V1 => self.abi_decode_validate(calldata, selector)?,
-            Self::V2 | Self::V3 => {}
+            Self::V2 | Self::V3 | Self::V4 => {}
         }
 
         IPolicyRegistry::IPolicyRegistryCalls::abi_decode_validate(calldata).map_err(|error| {
@@ -131,6 +143,7 @@ impl PolicyVersions {
     /// Returns the version active at `upgrade`, or `None` before the introduction
     pub fn from_base_upgrade(upgrade: BaseUpgrade) -> Option<PolicyVersion> {
         match upgrade {
+            u if u >= BaseUpgrade::Everest => Some(PolicyVersion::V4),
             u if u >= BaseUpgrade::Denim => Some(PolicyVersion::V3),
             u if u >= BaseUpgrade::Cobalt => Some(PolicyVersion::V2),
             u if u >= BaseUpgrade::Beryl => Some(PolicyVersion::V1),
@@ -147,8 +160,8 @@ mod tests {
     use base_common_genesis::BaseUpgrade;
 
     use crate::{
-        IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3, PolicyAbi,
-        PolicyVersion, PolicyVersions,
+        IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3,
+        IPolicyRegistryV4, PolicyAbi, PolicyVersion, PolicyVersions,
     };
 
     #[test]
@@ -169,7 +182,15 @@ mod tests {
     #[test]
     fn resolves_v3_from_denim() {
         assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Denim), Some(PolicyVersion::V3));
-        assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(PolicyVersion::V3));
+    }
+
+    #[test]
+    fn resolves_v4_from_everest() {
+        assert_eq!(
+            PolicyVersions::from_base_upgrade(BaseUpgrade::Everest),
+            Some(PolicyVersion::V4)
+        );
+        assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(PolicyVersion::V4));
     }
 
     /// The logic axis and the wire axis meet only here. Driven from the fork ladder so the whole
@@ -218,6 +239,14 @@ mod tests {
             .filter(|selector| !PolicyAbi::V2.valid_selector(*selector))
             .collect();
         assert_eq!(added, vec![IPolicyRegistry::invertedPolicyIdCall::SELECTOR]);
+    }
+
+    #[test]
+    fn v4_adds_only_policy_type() {
+        let added: Vec<[u8; 4]> = IPolicyRegistryV4::IPolicyRegistryCalls::selectors()
+            .filter(|selector| !PolicyAbi::V3.valid_selector(*selector))
+            .collect();
+        assert_eq!(added, vec![IPolicyRegistry::policyTypeCall::SELECTOR]);
     }
 
     /// `abi_decode_validate` short-circuits on `len < MIN_DATA_LENGTH + 4` before looking at the

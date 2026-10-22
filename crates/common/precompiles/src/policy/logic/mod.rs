@@ -3,7 +3,8 @@
 //! [`PolicyRegistryLogic`] (in [`interface`](self)) is the append-only business-logic
 //! interface each version implements; [`PolicyRegistryV1`] is the first frozen
 //! implementation (activated at Beryl), [`PolicyRegistryV2`] the second (activated at
-//! Cobalt), and [`PolicyRegistryV3`] the third (activated at Denim). Logic methods take a
+//! Cobalt), [`PolicyRegistryV3`] the third (activated at Denim), and [`PolicyRegistryV4`] the fourth
+//! (activated at Everest). Logic methods take a
 //! [`crate::PolicyAccounting`] storage port directly — there is no separate runtime wrapper.
 
 mod interface;
@@ -17,3 +18,6 @@ pub use v2::PolicyRegistryV2;
 
 mod v3;
 pub use v3::PolicyRegistryV3;
+
+mod v4;
+pub use v4::PolicyRegistryV4;

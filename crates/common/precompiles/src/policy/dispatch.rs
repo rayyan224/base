@@ -69,7 +69,8 @@ impl PolicyRegistryStorage<'_> {
                         || sel == IPolicyRegistry::policyAdminCall::SELECTOR
                         || sel == IPolicyRegistry::pendingPolicyAdminCall::SELECTOR
                         || sel == IPolicyRegistry::compositePolicyChildIdsCall::SELECTOR
-                        || sel == IPolicyRegistry::invertedPolicyIdCall::SELECTOR) =>
+                        || sel == IPolicyRegistry::invertedPolicyIdCall::SELECTOR
+                        || sel == IPolicyRegistry::policyTypeCall::SELECTOR) =>
             {
                 self.route(calldata, version, &observer)
             }
@@ -202,6 +203,11 @@ impl PolicyRegistryStorage<'_> {
             C::invertedPolicyId(call) => {
                 let policy_id = logic.compute_inverted_policy_id(call.policyId)?;
                 Ok(IPolicyRegistry::invertedPolicyIdCall::abi_encode_returns(&policy_id).into())
+            }
+            // Introduced in V4 (Everest).
+            C::policyType(call) => {
+                let policy_type = logic.policy_type(self, call.policyId)?;
+                Ok(IPolicyRegistry::policyTypeCall::abi_encode_returns(&policy_type).into())
             }
         }
     }
