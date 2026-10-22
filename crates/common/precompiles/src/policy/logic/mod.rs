@@ -14,3 +14,6 @@ pub use v1::PolicyRegistryV1;
 
 mod v2;
 pub use v2::PolicyRegistryV2;
+
+mod v3;
+pub use v3::PolicyRegistryV3;
