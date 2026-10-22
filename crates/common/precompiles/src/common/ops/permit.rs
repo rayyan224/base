@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, FixedBytes, U256, keccak256};
 use alloy_sol_types::SolValue;
 use base_precompile_storage::{BasePrecompileError, Result};
 
-use crate::IB20;
+use crate::{IB20, TokenAccounting};
 
 /// ERC-5267 `eip712Domain()` return tuple: (fields, name, version, chainId, verifyingContract, salt, extensions).
 pub type Eip712Domain = (FixedBytes<1>, String, String, U256, Address, B256, Vec<U256>);
@@ -40,6 +40,9 @@ impl PermitArgs {
     /// EIP-191 prefix for structured data, followed by the EIP-712 version byte.
     pub const EIP712_SIGNING_PREFIX: [u8; 2] = [0x19, 0x01];
 
+    /// Flat gas billed for signer recovery, matching the `ECRECOVER` precompile.
+    pub const ECRECOVER_GAS: u64 = 3_000;
+
     /// Legacy `v` value for even-Y ECDSA recovery (`ecrecover`).
     pub const RECOVERY_ID_EVEN_Y: u8 = 27;
     /// Legacy `v` value for odd-Y ECDSA recovery (`ecrecover`).
@@ -61,6 +64,39 @@ impl PermitArgs {
         buf[2..34].copy_from_slice(domain_separator.as_slice());
         buf[34..66].copy_from_slice(struct_hash.as_slice());
         keccak256(buf)
+    }
+
+    /// Builds the same EIP-712 signing digest as [`Self::signing_hash`], charging native keccak gas
+    /// for the struct hash and the final digest through `accounting`.
+    pub fn metered_signing_hash<T: TokenAccounting + ?Sized>(
+        &self,
+        accounting: &T,
+        domain_separator: B256,
+        nonce: U256,
+    ) -> Result<B256> {
+        let struct_hash = accounting.metered_keccak256(
+            &(Self::TYPEHASH, self.owner, self.spender, self.value, nonce, self.deadline)
+                .abi_encode(),
+        )?;
+        let mut buf = [0u8; 66];
+        buf[..2].copy_from_slice(&Self::EIP712_SIGNING_PREFIX);
+        buf[2..34].copy_from_slice(domain_separator.as_slice());
+        buf[34..66].copy_from_slice(struct_hash.as_slice());
+        accounting.metered_keccak256(&buf)
+    }
+
+    /// Charges [`Self::ECRECOVER_GAS`] through `accounting`, then recovers the signer exactly like
+    /// [`Self::recover_signer`].
+    ///
+    /// The charge precedes every signature check, so a malformed `v` or an unrecoverable signature
+    /// pays the same as a valid one.
+    pub fn metered_recover_signer<T: TokenAccounting + ?Sized>(
+        &self,
+        accounting: &T,
+        signing_hash: B256,
+    ) -> Result<Address> {
+        accounting.charge_gas(Self::ECRECOVER_GAS)?;
+        self.recover_signer(signing_hash)
     }
 
     /// Validates a recovered ECDSA address against the declared `owner`.

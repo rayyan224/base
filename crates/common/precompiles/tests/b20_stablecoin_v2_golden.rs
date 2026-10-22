@@ -1817,6 +1817,70 @@ fn golden_permit_reverts_when_expired() {
     assert_eq!(err, BasePrecompileError::revert(IB20::ExpiredSignature { deadline: u(10) }));
 }
 
+/// Cobalt meters `permit`: five keccak rounds (name, version, domain struct, struct hash, digest)
+/// and a flat 3000 gas for signer recovery.
+#[test]
+fn golden_permit_meters_keccak_and_ecrecover_gas() {
+    let mut s = fresh();
+    let owner = anvil_owner();
+    let domain = domain_separator(&mut s);
+    let call = signed_permit(domain, U256::ZERO, owner, BOB, u(500), U256::MAX);
+    s.set_timestamp(U256::ZERO);
+    s.reset_counters();
+    let gas_before = s.gas_deducted();
+    op(&mut s, owner, FakePolicyAccounting::new(), call.abi_encode()).unwrap();
+
+    assert_eq!(s.counter_keccak256(), 5);
+    assert_eq!(s.gas_deducted() - gas_before, 3_000);
+}
+
+/// Signer recovery is billed before any signature check can fail, and revert data is unchanged.
+#[test]
+fn golden_permit_charges_ecrecover_gas_on_invalid_signature() {
+    let owner = anvil_owner();
+
+    // Wrong signer: a signature valid for `owner` presented for a different `owner` argument.
+    let mut s = fresh();
+    let domain = domain_separator(&mut s);
+    let mut call = signed_permit(domain, U256::ZERO, owner, BOB, u(500), U256::MAX);
+    call.owner = ALICE;
+    s.set_timestamp(U256::ZERO);
+    let gas_before = s.gas_deducted();
+    let err = op(&mut s, ALICE, FakePolicyAccounting::new(), call.abi_encode()).unwrap_err();
+    assert!(matches!(err, BasePrecompileError::Revert(_)));
+    assert_eq!(s.gas_deducted() - gas_before, 3_000);
+
+    // Invalid `v`: rejected before secp256k1 recovery but still billed.
+    let mut s = fresh();
+    let domain = domain_separator(&mut s);
+    let mut call = signed_permit(domain, U256::ZERO, owner, BOB, u(500), U256::MAX);
+    call.v = 26;
+    s.set_timestamp(U256::ZERO);
+    let gas_before = s.gas_deducted();
+    let err = op(&mut s, owner, FakePolicyAccounting::new(), call.abi_encode()).unwrap_err();
+    assert_eq!(
+        err,
+        BasePrecompileError::revert(IB20::InvalidSigner { signer: Address::ZERO, owner })
+    );
+    assert_eq!(s.gas_deducted() - gas_before, 3_000);
+}
+
+/// The deadline check precedes all hashing and recovery, so an expired permit is not billed.
+#[test]
+fn golden_permit_expired_charges_no_gas() {
+    let mut s = fresh();
+    let owner = anvil_owner();
+    let domain = domain_separator(&mut s);
+    let call = signed_permit(domain, U256::ZERO, owner, BOB, u(1), u(10));
+    s.set_timestamp(u(11));
+    s.reset_counters();
+    let gas_before = s.gas_deducted();
+    op(&mut s, owner, FakePolicyAccounting::new(), call.abi_encode()).unwrap_err();
+
+    assert_eq!(s.counter_keccak256(), 0);
+    assert_eq!(s.gas_deducted(), gas_before);
+}
+
 // ============================================================================
 // computed + direct + constant reads (behavior-preserving: V1 roots reused)
 // ============================================================================
@@ -2304,7 +2368,7 @@ fn golden_gas_footprints() {
         ("burn_with_memo", (4, 2, 0)),
         ("renounce_role", (1, 1, 0)),
         ("renounce_last_admin", (4, 2, 0)),
-        ("permit", (3, 2, 0)),
+        ("permit", (3, 2, 5)),
     ];
 
     bless_or_assert_gas(&actual, expected);

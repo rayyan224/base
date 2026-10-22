@@ -29,6 +29,22 @@ const VERSION: &[u8] = b"1";
 pub struct StablecoinV2;
 
 impl StablecoinV2 {
+    /// EIP-712 domain separator for `permit`, charging native keccak gas for each hash round
+    /// (name, version and the domain struct). The unmetered view is `domain_separator`.
+    fn metered_domain_separator<S: StablecoinAccounting, A: PolicyAccounting>(
+        &self,
+        token: &B20StablecoinToken<S, A>,
+        chain_id: u64,
+    ) -> Result<B256> {
+        let name = token.accounting().name()?;
+        let name_hash = token.accounting().metered_keccak256(name.as_bytes())?;
+        let version_hash = token.accounting().metered_keccak256(VERSION)?;
+        let encoded =
+            (DOMAIN_TYPEHASH, name_hash, version_hash, U256::from(chain_id), token.token_address())
+                .abi_encode();
+        token.accounting().metered_keccak256(&encoded)
+    }
+
     const PAUSABLE_FEATURES: &[IB20::PausableFeature] = &[
         IB20::PausableFeature::TRANSFER,
         IB20::PausableFeature::MINT,
@@ -670,10 +686,10 @@ impl<S: StablecoinAccounting, A: PolicyAccounting> Stablecoin<S, A> for Stableco
                 deadline: args.deadline,
             }));
         }
-        let domain_sep = self.domain_separator(token, chain_id)?;
+        let domain_sep = self.metered_domain_separator(token, chain_id)?;
         let nonce = token.accounting().nonce(args.owner)?;
-        let signing_hash = args.signing_hash(domain_sep, nonce);
-        let recovered = args.recover_signer(signing_hash)?;
+        let signing_hash = args.metered_signing_hash(token.accounting(), domain_sep, nonce)?;
+        let recovered = args.metered_recover_signer(token.accounting(), signing_hash)?;
         PermitArgs::validate_recovered_address(recovered, args.owner)?;
         token.accounting_mut().increment_nonce(args.owner)?;
         self.approve(token, args.owner, args.spender, args.value)
