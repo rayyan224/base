@@ -569,6 +569,14 @@ impl<S: PolicyAccounting> PolicyRegistryLogic<S> for PolicyRegistryV2 {
         }
         storage.read_pending_admin(policy_id)
     }
+
+    fn composite_policy_child_ids(&self, storage: &S, policy_id: u64) -> Result<Vec<u64>> {
+        // Only composite IDs can carry a child set; this also excludes built-ins and malformed IDs.
+        if !Self::is_composite(policy_id) {
+            return Ok(Vec::new());
+        }
+        storage.read_children(policy_id)
+    }
 }
 
 #[cfg(test)]
@@ -1280,6 +1288,52 @@ mod tests {
     fn create_intersect(rt: &mut Storage, children: Vec<u64>) -> u64 {
         set_caller(rt, ADMIN);
         LOGIC.create_composite_policy(rt, ADMIN, PolicyType::INTERSECT, children).unwrap()
+    }
+
+    // --- compositePolicyChildIds ---
+
+    #[test]
+    fn composite_child_ids_returns_stored_order() {
+        let mut rt = initialized();
+        let a = create_allowlist(&mut rt);
+        let b = create_blocklist(&mut rt);
+        let c = create_allowlist(&mut rt);
+        let union = create_union(&mut rt, vec![c, a, b]);
+        let intersect = create_intersect(&mut rt, vec![b, c]);
+        assert_eq!(LOGIC.composite_policy_child_ids(&rt, union).unwrap(), vec![c, a, b]);
+        assert_eq!(LOGIC.composite_policy_child_ids(&rt, intersect).unwrap(), vec![b, c]);
+
+        LOGIC.update_composite(&mut rt, union, vec![b, a]).unwrap();
+        assert_eq!(LOGIC.composite_policy_child_ids(&rt, union).unwrap(), vec![b, a]);
+    }
+
+    #[test]
+    fn composite_child_ids_is_empty_for_non_composites() {
+        let mut rt = initialized();
+        let a = create_allowlist(&mut rt);
+        let b = create_blocklist(&mut rt);
+        let _ = create_union(&mut rt, vec![a, b]);
+        for id in [
+            a,
+            b,
+            PolicyRegistryV2::ALWAYS_ALLOW_ID,
+            PolicyRegistryV2::ALWAYS_BLOCK_ID,
+            999,
+            PolicyRegistryV2::make_id(PolicyType::ALLOWLIST as u8, 12345),
+            PolicyRegistryV2::make_id(4, 2),
+            u64::MAX,
+        ] {
+            assert!(LOGIC.composite_policy_child_ids(&rt, id).unwrap().is_empty(), "id {id:#x}");
+        }
+    }
+
+    #[test]
+    fn composite_child_ids_is_empty_for_unwritten_composite_ids() {
+        let rt = bare();
+        for gate in [PolicyType::UNION, PolicyType::INTERSECT] {
+            let id = PolicyRegistryV2::make_id(gate as u8, 2);
+            assert!(LOGIC.composite_policy_child_ids(&rt, id).unwrap().is_empty());
+        }
     }
 
     #[test]

@@ -264,6 +264,80 @@ fn golden_reads_for_nonexistent_and_builtins() {
     );
 }
 
+fn child_ids(storage: &mut HashMapStorageProvider, policy_id: u64) -> (bool, Bytes) {
+    call_policy(
+        storage,
+        OUTSIDER,
+        IPolicyRegistry::compositePolicyChildIdsCall { policyId: policy_id }.abi_encode(),
+    )
+}
+
+fn child_ids_bytes(ids: &[u64]) -> Bytes {
+    Bytes::from(IPolicyRegistry::compositePolicyChildIdsCall::abi_encode_returns(&ids.to_vec()))
+}
+
+#[test]
+fn golden_composite_policy_child_ids_returns_stored_order() {
+    let mut s = fresh();
+    let a = create(&mut s, ADMIN, ADMIN, PolicyType::ALLOWLIST);
+    let b = create(&mut s, ADMIN, ADMIN, PolicyType::BLOCKLIST);
+    let c = create(&mut s, ADMIN, ADMIN, PolicyType::ALLOWLIST);
+
+    let union = create_composite(&mut s, PolicyType::UNION, vec![c, a, b]);
+    let intersect = create_composite(&mut s, PolicyType::INTERSECT, vec![b, c]);
+    assert_eq!(child_ids(&mut s, union), (false, child_ids_bytes(&[c, a, b])));
+    assert_eq!(child_ids(&mut s, intersect), (false, child_ids_bytes(&[b, c])));
+
+    let (rev, _) = call_policy(
+        &mut s,
+        ADMIN,
+        IPolicyRegistry::updateCompositeCall { policyId: union, childPolicyIds: vec![b, a] }
+            .abi_encode(),
+    );
+    assert!(!rev);
+    assert_eq!(child_ids(&mut s, union), (false, child_ids_bytes(&[b, a])));
+}
+
+#[test]
+fn golden_composite_policy_child_ids_is_total() {
+    let mut s = fresh();
+    let a = create(&mut s, ADMIN, ADMIN, PolicyType::ALLOWLIST);
+    let b = create(&mut s, ADMIN, ADMIN, PolicyType::BLOCKLIST);
+    create_composite(&mut s, PolicyType::UNION, vec![a, b]);
+
+    let empty = child_ids_bytes(&[]);
+    for id in [
+        a,
+        b,
+        PolicyRegistryStorage::ALWAYS_ALLOW_ID,
+        PolicyRegistryStorage::ALWAYS_BLOCK_ID,
+        999,
+        (2u64 << 56) | 12345,
+        (3u64 << 56) | 12345,
+        (4u64 << 56) | 2,
+        u64::MAX,
+    ] {
+        assert_eq!(child_ids(&mut s, id), (false, empty.clone()), "id {id:#x}");
+    }
+}
+
+#[test]
+fn golden_composite_policy_child_ids_works_when_not_activated() {
+    // Never activated, nothing created: the view still answers and never reverts.
+    let mut s = HashMapStorageProvider::new(CHAIN_ID);
+    assert_eq!(child_ids(&mut s, (2u64 << 56) | 2), (false, child_ids_bytes(&[])));
+    assert_eq!(child_ids(&mut s, 0), (false, child_ids_bytes(&[])));
+}
+
+#[test]
+fn golden_composite_policy_child_ids_rejects_malformed_calldata() {
+    let mut s = fresh();
+    let mut calldata = IPolicyRegistry::compositePolicyChildIdsCall::SELECTOR.to_vec();
+    calldata.extend_from_slice(&[0u8; 31]);
+    let (rev, _) = call_policy(&mut s, OUTSIDER, calldata);
+    assert!(rev);
+}
+
 // ============================================================================
 // createPolicy
 // ============================================================================
@@ -1039,5 +1113,10 @@ fn v2_op_coverage_checklist(call: IPolicyRegistry::IPolicyRegistryCalls) {
         C::updateComposite(_) => {
             covered(&[golden_update_composite, golden_update_composite_reverts_unauthorized])
         }
+        C::compositePolicyChildIds(_) => covered(&[
+            golden_composite_policy_child_ids_returns_stored_order,
+            golden_composite_policy_child_ids_is_total,
+            golden_composite_policy_child_ids_works_when_not_activated,
+        ]),
     }
 }
