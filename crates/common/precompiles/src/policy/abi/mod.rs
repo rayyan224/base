@@ -12,7 +12,10 @@ mod v2;
 pub use v2::IPolicyRegistry as IPolicyRegistryV2;
 
 mod v3;
-pub use v3::{IPolicyRegistry, IPolicyRegistry as IPolicyRegistryV3};
+pub use v3::IPolicyRegistry as IPolicyRegistryV3;
+
+mod v4;
+pub use v4::{IPolicyRegistry, IPolicyRegistry as IPolicyRegistryV4};
 
 impl IPolicyRegistry::PolicyType {
     /// Returns the raw `u8` discriminant for this policy type.
@@ -26,7 +29,9 @@ mod tests {
     use alloy_primitives::{B256, b256};
     use alloy_sol_types::{SolEnum, SolError, SolEvent, SolInterface};
 
-    use super::{IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3};
+    use super::{
+        IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3, IPolicyRegistryV4,
+    };
     use crate::AbiFingerprint;
 
     /// Absolute wire fingerprint for Beryl's surface. Catches both-sides drift that relative
@@ -38,9 +43,13 @@ mod tests {
     const V2_ABI_FINGERPRINT: B256 =
         b256!("da3137a81688286fb3af7f0f09a6369ae7c1197c08844a29dbde13f8c036394d");
 
-    /// Absolute wire fingerprint for Denim's (canonical) surface.
+    /// Absolute wire fingerprint for Denim's surface.
     const V3_ABI_FINGERPRINT: B256 =
         b256!("bb97c5e5d9be7ba918aa74de1d7fa405fbc8fd7f77084f1d40217920ee17690e");
+
+    /// Absolute wire fingerprint for Everest's (canonical) surface, which adds `policyType`.
+    const V4_ABI_FINGERPRINT: B256 =
+        b256!("3bba4098d31eeb2e00e1ac55ffc6677891f488d909635c8206a86ba5d36ef8aa");
 
     /// These three surfaces pass no enum ordinals to [`AbiFingerprint`], so the pinned constants
     /// above keep the values they were blessed with. `PolicyType` ordinals *are* load-bearing —
@@ -78,6 +87,16 @@ mod tests {
         )
     }
 
+    fn v4_abi_fingerprint() -> B256 {
+        AbiFingerprint::compute(
+            IPolicyRegistryV4::IPolicyRegistryCalls::selectors(),
+            IPolicyRegistryV4::IPolicyRegistryEvents::SELECTORS.iter().copied().map(B256::new),
+            IPolicyRegistryV4::IPolicyRegistryErrors::selectors(),
+            IPolicyRegistryV4::PolicyType::COUNT,
+            [],
+        )
+    }
+
     #[test]
     fn v1_abi_fingerprint_is_pinned() {
         assert_eq!(v1_abi_fingerprint(), V1_ABI_FINGERPRINT);
@@ -91,6 +110,11 @@ mod tests {
     #[test]
     fn v3_abi_fingerprint_is_pinned() {
         assert_eq!(v3_abi_fingerprint(), V3_ABI_FINGERPRINT);
+    }
+
+    #[test]
+    fn v4_abi_fingerprint_is_pinned() {
+        assert_eq!(v4_abi_fingerprint(), V4_ABI_FINGERPRINT);
     }
 
     #[test]

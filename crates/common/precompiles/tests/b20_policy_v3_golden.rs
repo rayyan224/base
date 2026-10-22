@@ -335,6 +335,21 @@ fn golden_inverted_policy_id_reads_before_activation() {
     );
 }
 
+#[test]
+fn golden_policy_type_selector_unknown_in_v3() {
+    let mut storage = fresh();
+    let calldata = IPolicyRegistry::policyTypeCall { policyId: ALLOWLIST_ID }.abi_encode();
+
+    let (reverted, revert_data) = call_policy(&mut storage, ADMIN, calldata);
+
+    assert!(reverted, "policyType is a V4 selector and must revert on V3");
+    assert_eq!(
+        revert_data,
+        Bytes::from(IPolicyRegistry::policyTypeCall::SELECTOR.as_ref()),
+        "unknown-selector revert data is the 4-byte selector, not a typed error",
+    );
+}
+
 // ============================================================================
 // createPolicy
 // ============================================================================
@@ -1291,5 +1306,6 @@ fn v3_op_coverage_checklist(call: IPolicyRegistry::IPolicyRegistryCalls) {
             golden_min_max_composite_child_policies_read_before_activation,
         ]),
         C::invertedPolicyId(_) => covered(&[golden_inverted_policy_id_reads_before_activation]),
+        C::policyType(_) => covered(&[golden_policy_type_selector_unknown_in_v3]),
     }
 }

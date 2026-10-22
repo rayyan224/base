@@ -102,4 +102,10 @@ pub trait PolicyRegistryLogic<S: PolicyAccounting> {
     fn compute_inverted_policy_id(&self, _policy_id: u64) -> Result<u64> {
         reject_frozen_selector!()
     }
+
+    /// (V4) Returns the type of the policy `policy_id` refers to, reverting `PolicyNotFound`
+    /// if it does not exist.
+    fn policy_type(&self, _storage: &S, _policy_id: u64) -> Result<PolicyType> {
+        reject_frozen_selector!()
+    }
 }
