@@ -12,7 +12,9 @@ mod versions;
 pub use versions::{PolicyAbi, PolicyVersion, PolicyVersions};
 
 mod logic;
-pub use logic::{PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3};
+pub use logic::{
+    PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3, PolicyRegistryV4,
+};
 
 mod precompile;
 pub use precompile::PolicyRegistryPrecompile;

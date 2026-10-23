@@ -15,7 +15,7 @@ use base_precompile_storage::{BasePrecompileError, Result};
 
 use crate::{
     IPolicyRegistry, IPolicyRegistryV1, IPolicyRegistryV2, IPolicyRegistryV3, PolicyAccounting,
-    PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3,
+    PolicyRegistryLogic, PolicyRegistryV1, PolicyRegistryV2, PolicyRegistryV3, PolicyRegistryV4,
 };
 
 /// An activated version of the `PolicyRegistry` precompile logic.
@@ -29,6 +29,8 @@ pub enum PolicyVersion {
     V2,
     /// Introduced at Denim, superseding [`Self::V2`].
     V3,
+    /// Introduced at Everest, superseding [`Self::V3`].
+    V4,
 }
 
 impl PolicyVersion {
@@ -40,10 +42,12 @@ impl PolicyVersion {
         static V1: PolicyRegistryV1 = PolicyRegistryV1;
         static V2: PolicyRegistryV2 = PolicyRegistryV2;
         static V3: PolicyRegistryV3 = PolicyRegistryV3;
+        static V4: PolicyRegistryV4 = PolicyRegistryV4;
         match self {
             Self::V1 => &V1,
             Self::V2 => &V2,
             Self::V3 => &V3,
+            Self::V4 => &V4,
         }
     }
     /// Returns the wire (ABI) surface frozen for this version.
@@ -51,7 +55,8 @@ impl PolicyVersion {
         match self {
             Self::V1 => PolicyAbi::V1,
             Self::V2 => PolicyAbi::V2,
-            Self::V3 => PolicyAbi::V3,
+            // V4 reuses the Denim wire surface; no selectors changed.
+            Self::V3 | Self::V4 => PolicyAbi::V3,
         }
     }
 }
@@ -131,6 +136,7 @@ impl PolicyVersions {
     /// Returns the version active at `upgrade`, or `None` before the introduction
     pub fn from_base_upgrade(upgrade: BaseUpgrade) -> Option<PolicyVersion> {
         match upgrade {
+            u if u >= BaseUpgrade::Everest => Some(PolicyVersion::V4),
             u if u >= BaseUpgrade::Denim => Some(PolicyVersion::V3),
             u if u >= BaseUpgrade::Cobalt => Some(PolicyVersion::V2),
             u if u >= BaseUpgrade::Beryl => Some(PolicyVersion::V1),
@@ -169,7 +175,70 @@ mod tests {
     #[test]
     fn resolves_v3_from_denim() {
         assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Denim), Some(PolicyVersion::V3));
-        assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(PolicyVersion::V3));
+    }
+
+    #[test]
+    fn resolves_v4_from_everest() {
+        assert_eq!(
+            PolicyVersions::from_base_upgrade(BaseUpgrade::Everest),
+            Some(PolicyVersion::V4)
+        );
+        assert_eq!(PolicyVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(PolicyVersion::V4));
+    }
+
+    #[test]
+    fn every_upgrade_resolves_to_one_version_in_order() {
+        const LADDER: [BaseUpgrade; 17] = [
+            BaseUpgrade::Bedrock,
+            BaseUpgrade::Regolith,
+            BaseUpgrade::Canyon,
+            BaseUpgrade::Delta,
+            BaseUpgrade::Ecotone,
+            BaseUpgrade::Fjord,
+            BaseUpgrade::Granite,
+            BaseUpgrade::Holocene,
+            BaseUpgrade::PectraBlobSchedule,
+            BaseUpgrade::Isthmus,
+            BaseUpgrade::Jovian,
+            BaseUpgrade::Azul,
+            BaseUpgrade::Beryl,
+            BaseUpgrade::Cobalt,
+            BaseUpgrade::Denim,
+            BaseUpgrade::Everest,
+            BaseUpgrade::Zenith,
+        ];
+        fn rank(version: Option<PolicyVersion>) -> u8 {
+            match version {
+                None => 0,
+                Some(PolicyVersion::V1) => 1,
+                Some(PolicyVersion::V2) => 2,
+                Some(PolicyVersion::V3) => 3,
+                Some(PolicyVersion::V4) => 4,
+            }
+        }
+        let expected = [
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(PolicyVersion::V1),
+            Some(PolicyVersion::V2),
+            Some(PolicyVersion::V3),
+            Some(PolicyVersion::V4),
+            Some(PolicyVersion::V4),
+        ];
+        let resolved: Vec<_> =
+            LADDER.iter().map(|upgrade| PolicyVersions::from_base_upgrade(*upgrade)).collect();
+        assert_eq!(resolved, expected);
+        assert!(resolved.windows(2).all(|pair| rank(pair[0]) <= rank(pair[1])));
     }
 
     /// The logic axis and the wire axis meet only here. Driven from the fork ladder so the whole
@@ -179,13 +248,16 @@ mod tests {
         assert_eq!(PolicyVersion::V1.abi(), PolicyAbi::V1);
         assert_eq!(PolicyVersion::V2.abi(), PolicyAbi::V2);
         assert_eq!(PolicyVersion::V3.abi(), PolicyAbi::V3);
+        assert_eq!(PolicyVersion::V4.abi(), PolicyAbi::V3);
 
         let beryl = PolicyVersions::from_base_upgrade(BaseUpgrade::Beryl).unwrap();
         let cobalt = PolicyVersions::from_base_upgrade(BaseUpgrade::Cobalt).unwrap();
         let denim = PolicyVersions::from_base_upgrade(BaseUpgrade::Denim).unwrap();
+        let everest = PolicyVersions::from_base_upgrade(BaseUpgrade::Everest).unwrap();
         assert_eq!(beryl.abi(), PolicyAbi::V1);
         assert_eq!(cobalt.abi(), PolicyAbi::V2);
         assert_eq!(denim.abi(), PolicyAbi::V3);
+        assert_eq!(everest.abi(), PolicyAbi::V3);
     }
 
     /// The dispatcher re-decodes against the canonical surface after a frozen surface accepts, so
