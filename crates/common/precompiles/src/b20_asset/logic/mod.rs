@@ -4,7 +4,8 @@
 //! interface each version implements; [`B20AssetToken`] is the minimal
 //! storage + policy holder the logic operates on; [`AssetV1`] is the first
 //! frozen implementation (activated at Beryl), [`AssetV2`] the second (activated at
-//! Cobalt), and [`AssetV3`] the third (activated at Denim).
+//! Cobalt), [`AssetV3`] the third (activated at Denim), and [`AssetV4`] the fourth (activated at
+//! Everest).
 
 use alloy_primitives::Address;
 
@@ -21,6 +22,9 @@ pub use v2::AssetV2;
 
 mod v3;
 pub use v3::AssetV3;
+
+mod v4;
+pub use v4::AssetV4;
 
 /// Storage + policy binding the asset logic operates on.
 ///
