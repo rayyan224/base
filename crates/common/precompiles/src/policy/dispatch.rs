@@ -890,4 +890,185 @@ mod tests {
         assert!(out.is_revert());
         assert_eq!(out.bytes, Bytes::from(IPolicyRegistry::NonPayable {}.abi_encode()));
     }
+
+    fn fresh_at(upgrade: BaseUpgrade) -> HashMapStorageProvider {
+        HashMapStorageProvider::new_with_storage_features(
+            1,
+            crate::UpgradeGatedStorageFeatures::from_upgrade(upgrade),
+        )
+    }
+
+    fn policy_admin_calldata(policy_id: u64) -> Vec<u8> {
+        IPolicyRegistry::policyAdminCall { policyId: policy_id }.abi_encode()
+    }
+
+    fn policy_not_found_bytes() -> Bytes {
+        Bytes::from(IPolicyRegistry::PolicyNotFound::SELECTOR)
+    }
+
+    fn create_allowlist_at(storage: &mut HashMapStorageProvider, upgrade: BaseUpgrade) -> u64 {
+        storage.set_caller(ADMIN);
+        let calldata = IPolicyRegistry::createPolicyCall {
+            admin: ADMIN,
+            policyType: IPolicyRegistry::PolicyType::ALLOWLIST,
+        }
+        .abi_encode();
+        let output = run_at(storage, &calldata, upgrade);
+        assert!(!output.is_revert(), "create_allowlist_at setup unexpectedly reverted");
+        IPolicyRegistry::createPolicyCall::abi_decode_returns(&output.bytes).unwrap()
+    }
+
+    #[test]
+    fn everest_policy_admin_reverts_policy_not_found_for_missing_and_malformed() {
+        let mut storage = fresh_at(BaseUpgrade::Everest);
+        activate_policy_registry(&mut storage);
+        for id in [999u64, (1u64 << 56) | 2, (4u64 << 56) | 42, 999 | (1u64 << 63)] {
+            let out = run_at(&mut storage, &policy_admin_calldata(id), BaseUpgrade::Everest);
+            assert!(out.is_revert(), "policyAdmin({id:#x}) must revert at Everest");
+            assert_eq!(out.bytes, policy_not_found_bytes());
+        }
+    }
+
+    #[test]
+    fn everest_policy_admin_builtins_return_zero_before_any_policy() {
+        let mut storage = fresh_at(BaseUpgrade::Everest);
+        activate_policy_registry(&mut storage);
+        for id in [0u64, (1u64 << 56) | 1, 1u64 << 63, ((1u64 << 56) | 1) | (1u64 << 63)] {
+            let out = run_at(&mut storage, &policy_admin_calldata(id), BaseUpgrade::Everest);
+            assert!(!out.is_revert(), "policyAdmin({id:#x}) must not revert at Everest");
+            assert_eq!(
+                IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+                Address::ZERO
+            );
+        }
+    }
+
+    #[test]
+    fn everest_policy_admin_returns_admin_and_zero_after_renounce() {
+        let mut storage = fresh_at(BaseUpgrade::Everest);
+        activate_policy_registry(&mut storage);
+        let id = create_allowlist_at(&mut storage, BaseUpgrade::Everest);
+
+        let out = run_at(&mut storage, &policy_admin_calldata(id), BaseUpgrade::Everest);
+        assert!(!out.is_revert());
+        assert_eq!(
+            IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+            ADMIN
+        );
+
+        let out =
+            run_at(&mut storage, &policy_admin_calldata(id | (1u64 << 63)), BaseUpgrade::Everest);
+        assert_eq!(
+            IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+            ADMIN
+        );
+
+        storage.set_caller(ADMIN);
+        let renounce = IPolicyRegistry::renounceAdminCall { policyId: id }.abi_encode();
+        assert!(!run_at(&mut storage, &renounce, BaseUpgrade::Everest).is_revert());
+
+        let out = run_at(&mut storage, &policy_admin_calldata(id), BaseUpgrade::Everest);
+        assert!(!out.is_revert());
+        assert_eq!(
+            IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+            Address::ZERO
+        );
+    }
+
+    #[test]
+    fn everest_policy_admin_works_when_policy_registry_deactivated() {
+        let mut storage = fresh_at(BaseUpgrade::Everest);
+        activate_policy_registry(&mut storage);
+        let id = create_allowlist_at(&mut storage, BaseUpgrade::Everest);
+        deactivate_policy_registry(&mut storage);
+
+        let out = run_at(&mut storage, &policy_admin_calldata(id), BaseUpgrade::Everest);
+        assert!(!out.is_revert(), "policyAdmin must not revert when feature is deactivated");
+        assert_eq!(
+            IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+            ADMIN
+        );
+
+        let out = run_at(&mut storage, &policy_admin_calldata(999), BaseUpgrade::Everest);
+        assert!(out.is_revert());
+        assert_eq!(out.bytes, policy_not_found_bytes());
+    }
+
+    #[test]
+    fn active_forks_policy_admin_unchanged_for_missing_malformed_and_builtins() {
+        // Storage-access footprint (SLOAD count) pinned from the unmodified V1-V3 code.
+        let pinned_sloads = [1u64, 1, 0, 1, 1];
+        for upgrade in [BaseUpgrade::Beryl, BaseUpgrade::Cobalt, BaseUpgrade::Denim] {
+            let mut storage = fresh_at(upgrade);
+            activate_policy_registry(&mut storage);
+            let ids = [999u64, (1u64 << 56) | 2, (4u64 << 56) | 42, 0, (1u64 << 56) | 1];
+            for (id, expected_sload) in ids.into_iter().zip(pinned_sloads) {
+                storage.reset_counters();
+                let out = run_at(&mut storage, &policy_admin_calldata(id), upgrade);
+                assert!(!out.is_revert(), "policyAdmin({id:#x}) must not revert at {upgrade:?}");
+                assert_eq!(
+                    out.bytes,
+                    Bytes::from(IPolicyRegistry::policyAdminCall::abi_encode_returns(
+                        &Address::ZERO
+                    ))
+                );
+                assert_eq!(
+                    storage.counter_sload(),
+                    expected_sload,
+                    "SLOADs for {id:#x} at {upgrade:?}"
+                );
+            }
+            if upgrade == BaseUpgrade::Denim {
+                let out = run_at(&mut storage, &policy_admin_calldata(999 | (1u64 << 63)), upgrade);
+                assert_eq!(
+                    out.bytes,
+                    Bytes::from(IPolicyRegistry::policyAdminCall::abi_encode_returns(
+                        &Address::ZERO
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn active_forks_policy_admin_unchanged_for_existing_and_renounced() {
+        for upgrade in [BaseUpgrade::Beryl, BaseUpgrade::Cobalt, BaseUpgrade::Denim] {
+            let mut storage = fresh_at(upgrade);
+            activate_policy_registry(&mut storage);
+            let id = create_allowlist_at(&mut storage, upgrade);
+
+            let out = run_at(&mut storage, &policy_admin_calldata(id), upgrade);
+            assert!(!out.is_revert());
+            assert_eq!(
+                IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+                ADMIN
+            );
+
+            storage.set_caller(ADMIN);
+            let renounce = IPolicyRegistry::renounceAdminCall { policyId: id }.abi_encode();
+            assert!(!run_at(&mut storage, &renounce, upgrade).is_revert());
+
+            let out = run_at(&mut storage, &policy_admin_calldata(id), upgrade);
+            assert!(!out.is_revert());
+            assert_eq!(
+                IPolicyRegistry::policyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+                Address::ZERO
+            );
+        }
+    }
+
+    #[test]
+    fn pending_policy_admin_unchanged_at_everest() {
+        let mut storage = fresh_at(BaseUpgrade::Everest);
+        activate_policy_registry(&mut storage);
+        for id in [999u64, (4u64 << 56) | 42] {
+            let calldata = IPolicyRegistry::pendingPolicyAdminCall { policyId: id }.abi_encode();
+            let out = run_at(&mut storage, &calldata, BaseUpgrade::Everest);
+            assert!(!out.is_revert(), "pendingPolicyAdmin({id:#x}) must not revert at Everest");
+            assert_eq!(
+                IPolicyRegistry::pendingPolicyAdminCall::abi_decode_returns(&out.bytes).unwrap(),
+                Address::ZERO
+            );
+        }
+    }
 }

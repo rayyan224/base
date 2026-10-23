@@ -87,7 +87,9 @@ pub trait PolicyRegistryLogic<S: PolicyAccounting> {
     /// Returns whether `policy_id` refers to a built-in or previously created policy.
     fn policy_exists(&self, storage: &S, policy_id: u64) -> Result<bool>;
 
-    /// Returns the current admin of `policy_id`, or `Address::ZERO` if none / malformed.
+    /// Returns the current admin of `policy_id`. Built-in policies return `Address::ZERO`; a
+    /// non-built-in policy that does not exist, or a malformed ID, reverts `PolicyNotFound` in
+    /// the versions that define it.
     fn get_policy_admin(&self, storage: &S, policy_id: u64) -> Result<Address>;
 
     /// Returns the staged pending admin for `policy_id`, or `Address::ZERO` if none.
