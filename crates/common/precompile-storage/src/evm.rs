@@ -5,7 +5,7 @@
 //! It is constructed inside each native precompile's `run()` function and passed to
 //! [`StorageCtx::enter`] so that `#[contract]`-generated storage types read/write real EVM state.
 
-use alloc::string::ToString;
+use alloc::{collections::BTreeMap, string::ToString, vec::Vec};
 
 use alloy_evm::precompiles::PrecompileInput;
 use alloy_primitives::{Address, B256, Log, LogData, U256};
@@ -212,6 +212,46 @@ impl PrecompileStorageProvider for EvmPrecompileStorageProvider<'_> {
             }
 
             Ok(s.data)
+        })();
+
+        if result.is_ok() {
+            self.internals.checkpoint_commit();
+        } else {
+            self.internals.checkpoint_revert(checkpoint);
+        }
+
+        result
+    }
+
+    /// Before Everest, charges exactly what one `sload` per key charges. From Everest the whole
+    /// batch is one storage request: every slot pays the warm base cost, and the cold surcharge is
+    /// paid at most once per batch. A repeated key is read and charged once. If the batch runs out
+    /// of gas, every slot it loaded is un-warmed and no value is returned.
+    fn sload_batch(&mut self, address: Address, keys: &[U256]) -> Result<Vec<U256>> {
+        if !self.storage_features.batched_sload_discount_enabled() {
+            return keys.iter().map(|&key| self.sload(address, key)).collect();
+        }
+        let checkpoint = self.internals.checkpoint();
+        let result = (|| {
+            let mut loaded: BTreeMap<U256, U256> = BTreeMap::new();
+            let mut any_cold = false;
+            for &key in keys {
+                if loaded.contains_key(&key) {
+                    continue;
+                }
+                let s = self
+                    .internals
+                    .sload(address, key)
+                    .map_err(|e| BasePrecompileError::Fatal(e.to_string()))?;
+                any_cold |= s.is_cold;
+                loaded.insert(key, s.data);
+            }
+            let slots = loaded.len() as u64;
+            self.deduct_gas(self.gas_params.warm_storage_read_cost().saturating_mul(slots))?;
+            if any_cold {
+                self.deduct_gas(self.gas_params.cold_storage_additional_cost())?;
+            }
+            Ok(keys.iter().map(|key| loaded[key]).collect())
         })();
 
         if result.is_ok() {
@@ -709,5 +749,110 @@ mod tests {
 
         assert_eq!(err, BasePrecompileError::StaticCallViolation);
         assert!(provider.get_account_info(addr).is_none());
+    }
+
+    const BATCH_ADDR: Address = Address::repeat_byte(0x5b);
+
+    fn read_prices() -> (u64, u64) {
+        let gas = GasParams::default();
+        (gas.warm_storage_read_cost(), gas.cold_storage_additional_cost())
+    }
+
+    /// Gas charged by one `sload_batch` of `keys` in a fresh call at `features`, and its values.
+    fn batch_cost(
+        ctx: &mut EthEvmContext<EmptyDB>,
+        features: StorageFeatures,
+        gas: u64,
+        keys: &[u64],
+    ) -> (Result<alloc::vec::Vec<U256>, BasePrecompileError>, u64) {
+        let mut provider =
+            make_evm_provider_with_features(ctx, GasParams::default(), gas, false, features);
+        let keys: alloc::vec::Vec<U256> = keys.iter().map(|&k| U256::from(k)).collect();
+        let out = provider.sload_batch(BATCH_ADDR, &keys);
+        (out, provider.gas_used())
+    }
+
+    #[test]
+    fn everest_batch_pays_one_cold_surcharge() {
+        let (warm, cold_extra) = read_prices();
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        let (out, gas) =
+            batch_cost(&mut ctx, StorageFeatures::Everest, 1_000_000, &[1, 900, 7, 42]);
+        assert_eq!(out.unwrap().len(), 4);
+        assert_eq!(gas, 4 * warm + cold_extra, "scattered keys, one batch request");
+    }
+
+    #[test]
+    fn everest_batch_of_warm_slots_pays_no_surcharge() {
+        let (warm, _) = read_prices();
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        batch_cost(&mut ctx, StorageFeatures::Everest, 1_000_000, &[1, 2]).0.unwrap();
+        let (_, gas) = batch_cost(&mut ctx, StorageFeatures::Everest, 1_000_000, &[1, 2]);
+        assert_eq!(gas, 2 * warm);
+    }
+
+    #[test]
+    fn everest_batch_charges_duplicate_keys_once() {
+        let (warm, cold_extra) = read_prices();
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        let (out, gas) = batch_cost(&mut ctx, StorageFeatures::Everest, 1_000_000, &[3, 3, 4]);
+        assert_eq!(out.unwrap().len(), 3, "values returned in request order, duplicates included");
+        assert_eq!(gas, 2 * warm + cold_extra);
+    }
+
+    #[test]
+    fn everest_batch_returns_current_values_in_order() {
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        let mut provider = make_evm_provider_with_features(
+            &mut ctx,
+            GasParams::default(),
+            1_000_000,
+            false,
+            StorageFeatures::Everest,
+        );
+        provider.sstore(BATCH_ADDR, U256::from(2), U256::from(20)).unwrap();
+        provider.sstore(BATCH_ADDR, U256::from(9), U256::from(90)).unwrap();
+        let keys = [U256::from(9), U256::from(5), U256::from(2)];
+        assert_eq!(
+            provider.sload_batch(BATCH_ADDR, &keys).unwrap(),
+            [U256::from(90), U256::ZERO, U256::from(20)]
+        );
+    }
+
+    #[test]
+    fn everest_oog_batch_warms_nothing() {
+        let (warm, cold_extra) = read_prices();
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        let (out, _) =
+            batch_cost(&mut ctx, StorageFeatures::Everest, 2 * warm + cold_extra - 1, &[1, 2]);
+        assert_eq!(out, Err(BasePrecompileError::OutOfGas));
+        let (_, gas) = batch_cost(&mut ctx, StorageFeatures::Everest, 1_000_000, &[1]);
+        assert_eq!(gas, warm + cold_extra, "slot 1 must still be cold after the failed batch");
+    }
+
+    #[test]
+    fn pre_everest_batch_charges_like_separate_reads() {
+        let (warm, cold_extra) = read_prices();
+        for features in [StorageFeatures::Legacy, StorageFeatures::Cobalt] {
+            let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+            let (_, gas) = batch_cost(&mut ctx, features, 1_000_000, &[1, 900, 7, 3, 3]);
+            assert_eq!(gas, 4 * (warm + cold_extra) + warm, "{features:?}: no batch pricing");
+        }
+    }
+
+    #[test]
+    fn plain_sload_unchanged_at_everest() {
+        let (warm, cold_extra) = read_prices();
+        let mut ctx = EthEvmContext::new(EmptyDB::default(), SpecId::OSAKA);
+        let mut provider = make_evm_provider_with_features(
+            &mut ctx,
+            GasParams::default(),
+            1_000_000,
+            false,
+            StorageFeatures::Everest,
+        );
+        provider.sload(BATCH_ADDR, U256::from(1)).unwrap();
+        provider.sload(BATCH_ADDR, U256::from(2)).unwrap();
+        assert_eq!(provider.gas_used(), 2 * (warm + cold_extra), "only sload_batch is discounted");
     }
 }

@@ -23,6 +23,7 @@
 //! `BLESS_GOLDEN=1 cargo test -p base-common-precompiles --features test-utils \
 //!    --test b20_asset_v3_golden -- --nocapture` and copy the printed `GOLDEN_ROOT` values.
 
+use alloy_evm::{EvmInternals, eth::EthEvmContext, precompiles::PrecompileInput};
 use alloy_primitives::{Address, B256, Bytes, U256, b256, keccak256};
 use alloy_sol_types::{SolCall, SolError, SolEvent, SolValue};
 use base_common_genesis::BaseUpgrade;
@@ -30,9 +31,17 @@ use base_common_precompiles::{
     Asset, AssetAccounting, AssetV3, AssetVersion, AssetVersions, B20_MAX_SUPPLY_CAP, B20AssetInit,
     B20AssetStorage, B20AssetToken, B20PolicyType, B20TokenRole, ERC165_INTERFACE_ID,
     ERC8056_INTERFACE_IDS, FakePolicyAccounting, IB20, IB20Asset, NoopPrecompileCallObserver,
-    PolicyVersion, TokenAccounting,
+    PolicyVersion, TokenAccounting, UpgradeGatedStorageFeatures,
 };
-use base_precompile_storage::{BasePrecompileError, Handler, HashMapStorageProvider, StorageCtx};
+use base_precompile_storage::{
+    BasePrecompileError, EvmPrecompileStorageProvider, Handler, HashMapStorageProvider,
+    PrecompileStorageProvider, StorageCtx,
+};
+use revm::{
+    context_interface::{JournalTr, cfg::GasParams},
+    database::EmptyDB,
+    primitives::hardfork::SpecId,
+};
 
 mod common;
 use common::{
@@ -3248,6 +3257,122 @@ fn golden_announce_unprivileged_requires_role() {
             neededRole: operator_role(),
         })
     );
+}
+
+// ============================================================================
+// Batched transfer reads (real EVM gas): Denim vs Everest
+// ============================================================================
+
+/// One precompile call's EVM-backed provider at `upgrade`, as the installed precompiles build it.
+fn evm_provider(
+    evm: &mut EthEvmContext<EmptyDB>,
+    upgrade: BaseUpgrade,
+    caller: Address,
+) -> EvmPrecompileStorageProvider<'_> {
+    let input = PrecompileInput {
+        data: &[],
+        gas: 10_000_000,
+        reservoir: 0,
+        caller,
+        value: U256::ZERO,
+        target_address: TOKEN,
+        is_static: false,
+        bytecode_address: TOKEN,
+        internals: EvmInternals::from_context(evm),
+    };
+    EvmPrecompileStorageProvider::new_with_storage_features(
+        input,
+        GasParams::default(),
+        UpgradeGatedStorageFeatures::from_upgrade(upgrade),
+    )
+}
+
+/// Runs `calldata` from `caller` as the first call of a fresh transaction (all slots cold) on a
+/// token where ALICE holds 100 and BOB holds 5. Returns the result, gas used and token events.
+fn evm_transfer(
+    upgrade: BaseUpgrade,
+    caller: Address,
+    calldata: Vec<u8>,
+) -> (Result<(), BasePrecompileError>, u64, (U256, U256)) {
+    let mut evm = EthEvmContext::new(EmptyDB::default(), SpecId::PRAGUE);
+    {
+        let mut setup = evm_provider(&mut evm, upgrade, ADMIN);
+        StorageCtx::enter(&mut setup, |ctx| {
+            let mut token = B20AssetStorage::from_address(TOKEN, ctx);
+            token
+                .initialize(B20AssetInit {
+                    name: NAME.into(),
+                    symbol: SYMBOL.into(),
+                    supply_cap: B20_MAX_SUPPLY_CAP,
+                    multiplier: U256::ZERO,
+                    decimals: DECIMALS,
+                })
+                .expect("initialize asset");
+            fund(&mut token, ALICE, u(100));
+            fund(&mut token, BOB, u(5));
+        });
+    }
+    evm.journaled_state.commit_tx();
+
+    let version = AssetVersions::from_base_upgrade(upgrade).expect("asset installed");
+    let mut provider = evm_provider(&mut evm, upgrade, caller);
+    let result = StorageCtx::enter(&mut provider, |ctx| {
+        token(ctx, FakePolicyAccounting::new())
+            .route(ctx, &calldata, version, false, NoopPrecompileCallObserver)
+            .map(|_| ())
+    });
+    let gas = provider.gas_used();
+    let balances = StorageCtx::enter(&mut provider, |ctx| {
+        let t = B20AssetStorage::from_address(TOKEN, ctx);
+        (t.balance_of(ALICE).unwrap(), t.balance_of(BOB).unwrap())
+    });
+    (result, gas, balances)
+}
+
+/// From Everest an unprivileged transfer reads the policy word, paused bitmask and both balances
+/// in one `sload_batch`, paying the cold surcharge once instead of four times. Denim keeps the
+/// unbatched reads and its exact gas.
+#[test]
+fn golden_everest_transfer_reads_one_batch() {
+    let calldata = IB20::transferCall { to: BOB, amount: u(30) }.abi_encode();
+    let (denim_out, denim, denim_balances) =
+        evm_transfer(BaseUpgrade::Denim, ALICE, calldata.clone());
+    let (everest_out, everest, everest_balances) =
+        evm_transfer(BaseUpgrade::Everest, ALICE, calldata);
+    assert_eq!(denim_out, Ok(()));
+    assert_eq!(everest_out, Ok(()));
+    assert_eq!(everest_balances, denim_balances, "same resulting balances");
+    assert_eq!(everest_balances, (u(70), u(35)));
+    let saving = 3 * GasParams::default().cold_storage_additional_cost();
+    assert_eq!(everest, denim - saving, "denim {denim}, everest {everest}");
+}
+
+/// The batched path reverts with exactly the same bytes as the unbatched one.
+#[test]
+fn golden_everest_batched_transfer_reverts_match_denim() {
+    let cases = [
+        (ALICE, IB20::transferCall { to: Address::ZERO, amount: u(1) }.abi_encode()),
+        (ALICE, IB20::transferCall { to: TOKEN, amount: u(1) }.abi_encode()),
+        (ALICE, IB20::transferCall { to: BOB, amount: u(101) }.abi_encode()),
+        (CAROL, IB20::transferCall { to: BOB, amount: u(1) }.abi_encode()),
+    ];
+    for (caller, calldata) in cases {
+        let (denim, _, _) = evm_transfer(BaseUpgrade::Denim, caller, calldata.clone());
+        let (everest, _, _) = evm_transfer(BaseUpgrade::Everest, caller, calldata);
+        assert!(denim.is_err(), "{denim:?}");
+        assert_eq!(everest, denim);
+    }
+}
+
+/// A self-transfer leaves the balance unchanged on the batched path, as on the unbatched one.
+#[test]
+fn golden_everest_batched_self_transfer_keeps_balance() {
+    let calldata = IB20::transferCall { to: ALICE, amount: u(30) }.abi_encode();
+    let (denim_out, _, denim_balances) = evm_transfer(BaseUpgrade::Denim, ALICE, calldata.clone());
+    let (everest_out, _, everest_balances) = evm_transfer(BaseUpgrade::Everest, ALICE, calldata);
+    assert_eq!(everest_out, denim_out);
+    assert_eq!(everest_balances, denim_balances);
+    assert_eq!(everest_balances.0, u(100));
 }
 
 // ============================================================================

@@ -21,6 +21,21 @@ pub struct TransferPolicyIds {
     pub executor: u64,
 }
 
+/// Everything a policy-checked transfer reads from the token, fetched as one batch request.
+///
+/// See [`TokenAccounting::transfer_reads`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferReads {
+    /// Transfer policy ids.
+    pub policies: TransferPolicyIds,
+    /// Paused-feature bitmask.
+    pub paused: U256,
+    /// Balance of the sender.
+    pub from_balance: U256,
+    /// Balance of the receiver.
+    pub to_balance: U256,
+}
+
 impl TransferPolicyIds {
     /// Reads each id with a separate [`TokenAccounting::policy_id`] call.
     ///
@@ -136,6 +151,28 @@ pub trait TokenAccounting {
     /// in-memory test doubles) delegate to [`TransferPolicyIds::read_individually`], which is
     /// behaviorally identical.
     fn transfer_policy_ids(&self) -> Result<TransferPolicyIds>;
+
+    /// Returns whether [`Self::transfer_reads`] is priced as one batch request at the active fork.
+    ///
+    /// Logic takes the batched transfer path only when this is true, so forks before the batch
+    /// discount keep their original read sequence and gas. Defaults to `false`.
+    fn batched_reads_enabled(&self) -> bool {
+        false
+    }
+
+    /// Reads the transfer policy ids, the paused bitmask and both balances.
+    ///
+    /// EVM-backed adapters fetch all four slots in one batch request, so from Everest they pay the
+    /// cold surcharge once (see `PrecompileStorageProvider::sload_batch`). The default reads each
+    /// value separately and returns the same values.
+    fn transfer_reads(&self, from: Address, to: Address) -> Result<TransferReads> {
+        Ok(TransferReads {
+            policies: self.transfer_policy_ids()?,
+            paused: self.paused()?,
+            from_balance: self.balance_of(from)?,
+            to_balance: self.balance_of(to)?,
+        })
+    }
 
     // --- Event emission ---
 
