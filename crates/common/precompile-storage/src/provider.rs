@@ -173,6 +173,8 @@ pub enum StorageFeatures {
     Legacy,
     /// Apply Cobalt behavior, including dynamic tail cleanup and compact ABI decode errors.
     Cobalt,
+    /// Apply Everest behavior: every Cobalt feature plus the batched storage-read discount.
+    Everest,
 }
 
 impl StorageFeatures {
@@ -184,6 +186,12 @@ impl StorageFeatures {
     /// Returns whether ABI decode failures should omit the decoder message.
     pub fn selector_only_abi_decode_errors_enabled(self) -> bool {
         self >= Self::Cobalt
+    }
+
+    /// Returns whether a cold read of the slot after one already read in the same precompile
+    /// call is priced as warm.
+    pub fn batched_sload_discount_enabled(self) -> bool {
+        self >= Self::Everest
     }
 }
 

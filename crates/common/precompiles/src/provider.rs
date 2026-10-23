@@ -576,7 +576,9 @@ mod tests {
     #[rstest]
     #[case::beryl(BaseUpgrade::Beryl, StorageFeatures::Legacy)]
     #[case::cobalt(BaseUpgrade::Cobalt, StorageFeatures::Cobalt)]
-    fn storage_features_activate_at_cobalt(
+    #[case::denim(BaseUpgrade::Denim, StorageFeatures::Cobalt)]
+    #[case::everest(BaseUpgrade::Everest, StorageFeatures::Everest)]
+    fn storage_features_follow_upgrade(
         #[case] spec: BaseUpgrade,
         #[case] expected: StorageFeatures,
     ) {
