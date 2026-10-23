@@ -32,4 +32,4 @@ mod token;
 pub use token::Token;
 
 mod token_accounting;
-pub use token_accounting::{B20_MAX_SUPPLY_CAP, TokenAccounting, TransferPolicyIds};
+pub use token_accounting::{B20_MAX_SUPPLY_CAP, TokenAccounting, TransferPolicyIds, TransferReads};

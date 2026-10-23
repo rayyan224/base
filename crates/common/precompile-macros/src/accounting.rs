@@ -263,6 +263,19 @@ fn expand_token(input: DeriveInput) -> syn::Result<TokenStream> {
                 self.b20.transfer_policy_ids()
             }
 
+            fn batched_reads_enabled(&self) -> bool {
+                self.b20.batched_reads_enabled()
+            }
+
+            fn transfer_reads(
+                &self,
+                from: ::alloy_primitives::Address,
+                to: ::alloy_primitives::Address,
+            ) -> ::base_precompile_storage::Result<crate::TransferReads> {
+                // One batch request for the policy word, paused bitmask and both balances.
+                self.b20.transfer_reads(from, to)
+            }
+
             fn set_policy_id(
                 &mut self,
                 policy_scope: ::alloy_primitives::B256,

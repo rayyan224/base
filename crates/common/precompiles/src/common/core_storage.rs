@@ -4,9 +4,9 @@ use alloc::string::String;
 
 use alloy_primitives::{Address, B256, FixedBytes, U256};
 use base_precompile_macros::Storable;
-use base_precompile_storage::{Mapping, Result, StorageOps, Word};
+use base_precompile_storage::{Mapping, Result, StorageKey, StorageOps, Word};
 
-use crate::TransferPolicyIds;
+use crate::{TransferPolicyIds, TransferReads};
 
 /// Core B-20 storage rooted at the `base.b20` ERC-7201 namespace.
 #[derive(Debug, Clone, Storable)]
@@ -98,6 +98,29 @@ pub struct B20CoreStorage {
 }
 
 impl B20CoreStorageHandler<'_> {
+    /// Returns whether batch reads are priced as one storage request at the active fork.
+    pub fn batched_reads_enabled(&self) -> bool {
+        self.storage.storage_features().batched_sload_discount_enabled()
+    }
+
+    /// Reads the transfer policy ids, the paused bitmask and the `from` and `to` balances as one
+    /// batch request (see `PrecompileStorageProvider::sload_batch`).
+    pub fn transfer_reads(&self, from: Address, to: Address) -> Result<TransferReads> {
+        let keys = [
+            self.transfer_sender_policy_id.slot(),
+            self.paused.slot(),
+            from.mapping_slot(self.balances.slot()),
+            to.mapping_slot(self.balances.slot()),
+        ];
+        let words = self.storage.sload_batch(self.address, &keys)?;
+        Ok(TransferReads {
+            policies: Self::decode_transfer_policy_ids(words[0])?,
+            paused: words[1],
+            from_balance: words[2],
+            to_balance: words[3],
+        })
+    }
+
     /// Reads the sender/receiver/executor transfer policy ids in a single SLOAD.
     ///
     /// The three ids are packed into one storage word (slot 9); loading it once and extracting each
@@ -106,7 +129,11 @@ impl B20CoreStorageHandler<'_> {
     /// offset test below).
     pub fn transfer_policy_ids(&self) -> Result<TransferPolicyIds> {
         let slot = self.transfer_sender_policy_id.slot();
-        let word = StorageOps::load(&self.transfer_sender_policy_id, slot)?;
+        Self::decode_transfer_policy_ids(StorageOps::load(&self.transfer_sender_policy_id, slot)?)
+    }
+
+    /// Extracts the three transfer policy ids from the packed slot-9 word.
+    fn decode_transfer_policy_ids(word: U256) -> Result<TransferPolicyIds> {
         Ok(TransferPolicyIds {
             sender: Word::extract_from_word::<u64>(
                 word,

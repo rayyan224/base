@@ -138,6 +138,12 @@ impl<'a> StorageCtx<'a> {
         self.try_with_storage(|s| s.sload(address, key))
     }
 
+    /// Reads `keys` of `address` as one batch request (see
+    /// [`PrecompileStorageProvider::sload_batch`]).
+    pub fn sload_batch(&self, address: Address, keys: &[U256]) -> Result<Vec<U256>> {
+        self.try_with_storage(|s| s.sload_batch(address, keys))
+    }
+
     /// Performs a TLOAD (transient storage read).
     pub fn tload(&self, address: Address, key: U256) -> Result<U256> {
         self.try_with_storage(|s| s.tload(address, key))

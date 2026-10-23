@@ -103,6 +103,82 @@ impl AssetV3 {
         self.move_balance(token, from, to, transfer.amount)
     }
 
+    /// Unprivileged `transfer` when batch reads are priced as one request (Everest and later).
+    ///
+    /// **Testing only, not fork-safe as a pattern:** this edits frozen V3 behind a storage-feature
+    /// check instead of adding a new version. Denim never reaches it, because Denim's storage
+    /// features disable batching.
+    ///
+    /// Reads the policy word, the paused bitmask and both balances in one `sload_batch`, so the
+    /// cold surcharge is paid once instead of four times. Reverts and their order match the
+    /// unbatched path: `ContractPaused`, `InvalidReceiver`, `InvalidSender`, the policy checks,
+    /// then `InsufficientBalance`. Invalid endpoints fall back to the single paused read, so a
+    /// zero-address transfer still rejects before any policy-id SLOAD (Cantina #13 / BOP-600).
+    fn transfer_batched<S: AssetAccounting, A: PolicyAccounting>(
+        &self,
+        token: &mut B20AssetToken<S, A>,
+        caller: Address,
+        to: Address,
+        amount: U256,
+    ) -> Result<()> {
+        let recipient = B20CreditRecipientStrategy::ExcludingZeroAndSelf
+            .recipient(to, token.token_address())
+            .map_err(|_| BasePrecompileError::revert(IB20::InvalidReceiver { receiver: to }));
+        let sender = NonZeroAddress::new(caller)
+            .map_err(|_| BasePrecompileError::revert(IB20::InvalidSender { sender: caller }));
+        let (recipient, sender) = match (recipient, sender) {
+            (Ok(recipient), Ok(sender)) => (recipient, sender),
+            (recipient, sender) => {
+                B20Guards::ensure_not_paused(token, IB20::PausableFeature::TRANSFER)?;
+                recipient?;
+                return sender.map(|_| ());
+            }
+        };
+        let (from, to) = (sender.get(), recipient.get());
+        let reads = token.accounting().transfer_reads(from, to)?;
+        let feature = IB20::PausableFeature::TRANSFER;
+        if reads.paused & B20PausableFeature::mask(feature) != U256::ZERO {
+            return Err(BasePrecompileError::revert(IB20::ContractPaused { feature }));
+        }
+        let policies = reads.policies;
+        B20Guards::ensure_authorized_by_id(
+            token,
+            B20PolicyType::TransferExecutor.id(),
+            policies.executor,
+            caller,
+        )?;
+        if caller != from || policies.executor != policies.sender {
+            B20Guards::ensure_authorized_by_id(
+                token,
+                B20PolicyType::TransferSender.id(),
+                policies.sender,
+                from,
+            )?;
+        }
+        B20Guards::ensure_authorized_by_id(
+            token,
+            B20PolicyType::TransferReceiver.id(),
+            policies.receiver,
+            to,
+        )?;
+        if reads.from_balance < amount {
+            return Err(BasePrecompileError::revert(IB20::InsufficientBalance {
+                sender: from,
+                balance: reads.from_balance,
+                needed: amount,
+            }));
+        }
+        // A self-transfer (`to == from`) must credit the post-debit balance, as the unbatched
+        // path does by re-reading it after the debit.
+        let new_from_balance = reads.from_balance - amount;
+        token.accounting_mut().set_balance(from, new_from_balance)?;
+        let to_balance = if to == from { new_from_balance } else { reads.to_balance };
+        let new_to_balance =
+            to_balance.checked_add(amount).ok_or_else(BasePrecompileError::under_overflow)?;
+        token.accounting_mut().set_balance(to, new_to_balance)?;
+        token.accounting_mut().emit_event(IB20::Transfer { from, to, amount }.encode_log_data())
+    }
+
     /// Debits `from`, credits `to`, and emits `Transfer(from, to, amount)`.
     ///
     /// The shared balance-move primitive: no policy, allowance, pause, or zero-address checks —
@@ -255,6 +331,9 @@ impl<S: AssetAccounting, A: PolicyAccounting> Asset<S, A> for AssetV3 {
         amount: U256,
         privileged: bool,
     ) -> Result<()> {
+        if !privileged && token.accounting().batched_reads_enabled() {
+            return self.transfer_batched(token, caller, to, amount);
+        }
         B20Guards::ensure_not_paused(token, IB20::PausableFeature::TRANSFER)?;
         let to = B20CreditRecipientStrategy::ExcludingZeroAndSelf
             .recipient(to, token.token_address())
