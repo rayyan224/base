@@ -37,7 +37,8 @@ pub enum AssetVersion {
     V2,
     /// Introduced at Denim, superseding [`Self::V2`].
     V3,
-    /// Introduced at Everest, superseding [`Self::V3`].
+    /// Introduced at Everest, superseding [`Self::V3`]. Stops emitting the deprecated
+    /// `MultiplierUpdated` from `updateMultiplier`.
     V4,
 }
 
