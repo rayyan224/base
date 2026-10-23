@@ -11,10 +11,10 @@ use crate::{
 };
 
 /// Per-word *input* calldata gas charge (`G_SHA3WORD`, revm's
-/// `gas::KECCAK256WORD`), matching common Base precompile dispatch. This is the
-/// input-word model; the sibling transaction-context dispatcher instead prices
-/// *output* words at `W_copy` (see [`crate::tx_context::dispatch`]), so the two
-/// dispatchers deliberately use different word costs.
+/// `gas::KECCAK256WORD`), matching common Base precompile dispatch. The
+/// transaction-context dispatcher prices output words at `W_copy` and, from
+/// Everest, also prices input words at the shared `crate::CALLDATA_WORD_GAS`
+/// (see [`crate::tx_context::dispatch`]).
 const CALLDATA_WORD_GAS: u64 = 6;
 
 impl NonceManagerStorage<'_> {
