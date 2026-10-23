@@ -11,7 +11,7 @@ use crate::{
     PolicyRegistryLogic,
 };
 
-/// Fourth `PolicyRegistry` implementation. Activated at Everest; currently identical to V3.
+/// Fourth `PolicyRegistry` implementation. Activated at Everest; `policyAdmin` reverts `PolicyNotFound` for policies that do not exist.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PolicyRegistryV4;
 
@@ -573,14 +573,13 @@ impl<S: PolicyAccounting> PolicyRegistryLogic<S> for PolicyRegistryV4 {
 
     fn get_policy_admin(&self, storage: &S, policy_id: u64) -> Result<Address> {
         let policy_id = Self::base_policy_id(policy_id);
+        if Self::is_builtin(policy_id) {
+            return Ok(Address::ZERO);
+        }
         if !Self::is_well_formed(policy_id) {
-            return Ok(Address::ZERO);
+            return Err(BasePrecompileError::revert(IPolicyRegistry::PolicyNotFound {}));
         }
-        let packed = PackedPolicy::from_raw(storage.read_policy_word(policy_id)?);
-        if !packed.exists() {
-            return Ok(Address::ZERO);
-        }
-        Ok(packed.admin())
+        Ok(self.require_existing_policy(storage, policy_id)?.admin())
     }
 
     fn pending_policy_admin(&self, storage: &S, policy_id: u64) -> Result<Address> {
@@ -615,7 +614,7 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use alloy_primitives::{Address, U256, address};
-    use alloy_sol_types::SolEvent;
+    use alloy_sol_types::{SolError, SolEvent};
     use base_precompile_storage::BasePrecompileError;
 
     use crate::{
@@ -1147,17 +1146,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn get_policy_admin_malformed_policy_id_returns_zero_address() {
-        let rt = initialized();
-        let malformed: u64 = (4u64 << 56) | 42;
-        assert_eq!(LOGIC.get_policy_admin(&rt, malformed).unwrap(), Address::ZERO);
+    fn assert_policy_not_found(err: BasePrecompileError) {
+        assert_eq!(
+            err,
+            BasePrecompileError::Revert(IPolicyRegistry::PolicyNotFound {}.abi_encode().into())
+        );
+        assert_eq!(IPolicyRegistry::PolicyNotFound::SELECTOR.len(), 4);
     }
 
     #[test]
-    fn get_policy_admin_nonexistent_policy_returns_zero_address() {
+    fn get_policy_admin_nonexistent_policy_reverts_policy_not_found() {
         let rt = initialized();
-        assert_eq!(LOGIC.get_policy_admin(&rt, 0xdeadbeef).unwrap(), Address::ZERO);
+        for id in [
+            0xdeadbeef,
+            PolicyRegistryV4::make_id(PolicyType::ALLOWLIST as u8, 2),
+            PolicyRegistryV4::make_id(PolicyType::UNION as u8, 2),
+            PolicyRegistryV4::make_id(PolicyType::INTERSECT as u8, 2),
+        ] {
+            assert_policy_not_found(LOGIC.get_policy_admin(&rt, id).unwrap_err());
+        }
+    }
+
+    #[test]
+    fn get_policy_admin_malformed_policy_id_reverts_policy_not_found() {
+        let rt = initialized();
+        let malformed: u64 = (4u64 << 56) | 42;
+        assert_policy_not_found(LOGIC.get_policy_admin(&rt, malformed).unwrap_err());
+        assert_policy_not_found(
+            LOGIC
+                .get_policy_admin(&rt, PolicyRegistryV4::inverted_policy_id(malformed))
+                .unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn get_policy_admin_existing_policy_returns_admin() {
+        let mut rt = initialized();
+        let id = create_allowlist(&mut rt);
+        assert_eq!(LOGIC.get_policy_admin(&rt, id).unwrap(), ADMIN);
+    }
+
+    #[test]
+    fn get_policy_admin_renounced_policy_returns_zero_address() {
+        let mut rt = initialized();
+        let id = create_allowlist(&mut rt);
+        LOGIC.renounce_admin(&mut rt, id).unwrap();
+        assert_eq!(LOGIC.get_policy_admin(&rt, id).unwrap(), Address::ZERO);
+    }
+
+    #[test]
+    fn get_policy_admin_builtin_ids_return_zero_address_before_initialization() {
+        let rt = bare();
+        for id in [
+            PolicyRegistryV4::ALWAYS_ALLOW_ID,
+            PolicyRegistryV4::ALWAYS_BLOCK_ID,
+            PolicyRegistryV4::inverted_policy_id(PolicyRegistryV4::ALWAYS_ALLOW_ID),
+            PolicyRegistryV4::inverted_policy_id(PolicyRegistryV4::ALWAYS_BLOCK_ID),
+        ] {
+            assert_eq!(LOGIC.get_policy_admin(&rt, id).unwrap(), Address::ZERO);
+        }
+    }
+
+    #[test]
+    fn get_policy_admin_inverted_id_matches_base() {
+        let mut rt = initialized();
+        let id = create_allowlist(&mut rt);
+        assert_eq!(
+            LOGIC.get_policy_admin(&rt, PolicyRegistryV4::inverted_policy_id(id)).unwrap(),
+            ADMIN
+        );
+        let uncreated = PolicyRegistryV4::make_id(PolicyType::ALLOWLIST as u8, 9999);
+        assert_policy_not_found(
+            LOGIC
+                .get_policy_admin(&rt, PolicyRegistryV4::inverted_policy_id(uncreated))
+                .unwrap_err(),
+        );
     }
 
     #[test]
