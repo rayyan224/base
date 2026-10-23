@@ -64,6 +64,10 @@ name = "b20_asset_v3_golden"
 required-features = ["test-utils"]
 
 [[test]]
+name = "b20_asset_v4_golden"
+required-features = ["test-utils"]
+
+[[test]]
 name = "b20_policy_v1_golden"
 required-features = ["test-utils"]
 
