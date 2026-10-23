@@ -21,8 +21,8 @@ use base_common_genesis::BaseUpgrade;
 use base_precompile_storage::{BasePrecompileError, Result};
 
 use crate::{
-    Asset, AssetAccounting, AssetV1, AssetV2, AssetV3, B20Abi, IB20, IB20Asset, IB20AssetV1,
-    IB20AssetV2, PolicyAccounting,
+    Asset, AssetAccounting, AssetV1, AssetV2, AssetV3, AssetV4, B20Abi, IB20, IB20Asset,
+    IB20AssetV1, IB20AssetV2, PolicyAccounting,
 };
 
 /// An activated version of the asset B-20 precompile logic.
@@ -37,6 +37,9 @@ pub enum AssetVersion {
     V2,
     /// Introduced at Denim, superseding [`Self::V2`].
     V3,
+    /// Introduced at Everest, superseding [`Self::V3`]. Stops emitting the deprecated
+    /// `MultiplierUpdated` from `updateMultiplier`.
+    V4,
 }
 
 impl AssetVersion {
@@ -49,10 +52,12 @@ impl AssetVersion {
         static V1: AssetV1 = AssetV1;
         static V2: AssetV2 = AssetV2;
         static V3: AssetV3 = AssetV3;
+        static V4: AssetV4 = AssetV4;
         match self {
             Self::V1 => &V1,
             Self::V2 => &V2,
             Self::V3 => &V3,
+            Self::V4 => &V4,
         }
     }
 
@@ -64,8 +69,10 @@ impl AssetVersion {
     pub const fn abi(self) -> AssetAbiPair {
         match self {
             Self::V1 => AssetAbiPair { asset: AssetAbi::V1, common_b20: B20Abi::V1 },
-            // V3 reuses the Cobalt wire surface until a later Denim PR adds selectors.
-            Self::V2 | Self::V3 => AssetAbiPair { asset: AssetAbi::V2, common_b20: B20Abi::V2 },
+            // V3 and V4 reuse the Cobalt wire surface.
+            Self::V2 | Self::V3 | Self::V4 => {
+                AssetAbiPair { asset: AssetAbi::V2, common_b20: B20Abi::V2 }
+            }
         }
     }
 }
@@ -191,14 +198,15 @@ impl AssetVersions {
     /// Returns the version active at `upgrade`, or `None` before the introduction
     /// fork (Beryl), where the asset precompile is not installed at all.
     ///
-    /// V1 is active from Beryl; V2 supersedes it from Cobalt; V3 supersedes V2 from Denim.
+    /// V1 is active from Beryl; V2 from Cobalt; V3 from Denim; V4 supersedes V3 from Everest.
     pub fn from_base_upgrade(upgrade: BaseUpgrade) -> Option<AssetVersion> {
-        // Ordered thresholds rather than per-variant arms: a fork newer than Denim must inherit the
-        // latest version (V3) until one supersedes it, and `BaseUpgrade` is `#[non_exhaustive]`, so
+        // Ordered thresholds rather than per-variant arms: a fork newer than Everest must inherit the
+        // latest version (V4) until one supersedes it, and `BaseUpgrade` is `#[non_exhaustive]`, so
         // an explicit-variant match would need a wildcard that would wrongly send future forks to
         // `None`.
         match upgrade {
-            u if u >= BaseUpgrade::Denim => Some(AssetVersion::V3),
+            u if u >= BaseUpgrade::Everest => Some(AssetVersion::V4),
+            u if u >= BaseUpgrade::Denim && u < BaseUpgrade::Everest => Some(AssetVersion::V3),
             u if u >= BaseUpgrade::Cobalt => Some(AssetVersion::V2),
             u if u >= BaseUpgrade::Beryl => Some(AssetVersion::V1),
             _ => None,
@@ -236,9 +244,57 @@ mod tests {
     }
 
     #[test]
-    fn resolves_v3_from_denim() {
+    fn resolves_v3_at_denim() {
         assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Denim), Some(AssetVersion::V3));
-        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(AssetVersion::V3));
+    }
+
+    #[test]
+    fn resolves_v4_from_everest() {
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Everest), Some(AssetVersion::V4));
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(AssetVersion::V4));
+    }
+
+    #[test]
+    fn every_upgrade_resolves_to_one_version_in_order() {
+        let upgrades = [
+            BaseUpgrade::Bedrock,
+            BaseUpgrade::Regolith,
+            BaseUpgrade::Canyon,
+            BaseUpgrade::Delta,
+            BaseUpgrade::Ecotone,
+            BaseUpgrade::Fjord,
+            BaseUpgrade::Granite,
+            BaseUpgrade::Holocene,
+            BaseUpgrade::PectraBlobSchedule,
+            BaseUpgrade::Isthmus,
+            BaseUpgrade::Jovian,
+            BaseUpgrade::Azul,
+            BaseUpgrade::Beryl,
+            BaseUpgrade::Cobalt,
+            BaseUpgrade::Denim,
+            BaseUpgrade::Everest,
+            BaseUpgrade::Zenith,
+        ];
+        let ordinal = |version: Option<AssetVersion>| match version {
+            None => 0,
+            Some(AssetVersion::V1) => 1,
+            Some(AssetVersion::V2) => 2,
+            Some(AssetVersion::V3) => 3,
+            Some(AssetVersion::V4) => 4,
+        };
+        let mut previous = 0;
+        for upgrade in upgrades {
+            let version = AssetVersions::from_base_upgrade(upgrade);
+            let current = ordinal(version);
+            assert!(current >= previous, "{upgrade:?} regressed the asset version");
+            previous = current;
+        }
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Azul), None);
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Beryl), Some(AssetVersion::V1));
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Cobalt), Some(AssetVersion::V2));
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Denim), Some(AssetVersion::V3));
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Everest), Some(AssetVersion::V4));
+        assert_eq!(AssetVersions::from_base_upgrade(BaseUpgrade::Zenith), Some(AssetVersion::V4));
     }
 
     /// The logic axis and both wire axes meet only here. Driven from the fork ladder so the whole
@@ -257,16 +313,23 @@ mod tests {
             AssetVersion::V3.abi(),
             AssetAbiPair { asset: AssetAbi::V2, common_b20: B20Abi::V2 }
         );
+        assert_eq!(
+            AssetVersion::V4.abi(),
+            AssetAbiPair { asset: AssetAbi::V2, common_b20: B20Abi::V2 }
+        );
 
         let beryl = AssetVersions::from_base_upgrade(BaseUpgrade::Beryl).unwrap();
         let cobalt = AssetVersions::from_base_upgrade(BaseUpgrade::Cobalt).unwrap();
         let denim = AssetVersions::from_base_upgrade(BaseUpgrade::Denim).unwrap();
+        let everest = AssetVersions::from_base_upgrade(BaseUpgrade::Everest).unwrap();
         assert_eq!(beryl.abi().asset, AssetAbi::V1);
         assert_eq!(beryl.abi().common_b20, B20Abi::V1);
         assert_eq!(cobalt.abi().asset, AssetAbi::V2);
         assert_eq!(cobalt.abi().common_b20, B20Abi::V2);
         assert_eq!(denim.abi().asset, AssetAbi::V2);
         assert_eq!(denim.abi().common_b20, B20Abi::V2);
+        assert_eq!(everest.abi().asset, AssetAbi::V2);
+        assert_eq!(everest.abi().common_b20, B20Abi::V2);
     }
 
     /// `SolInterface::NAME` lands in consensus data: the short-calldata branch of
@@ -342,7 +405,12 @@ mod tests {
 
     #[test]
     fn asset_and_common_selectors_are_disjoint_on_each_wire() {
-        for wire in [AssetVersion::V1.abi(), AssetVersion::V2.abi(), AssetVersion::V3.abi()] {
+        for wire in [
+            AssetVersion::V1.abi(),
+            AssetVersion::V2.abi(),
+            AssetVersion::V3.abi(),
+            AssetVersion::V4.abi(),
+        ] {
             for selector in IB20Asset::IB20AssetCalls::selectors() {
                 if wire.asset.valid_selector(selector) {
                     assert!(
@@ -376,7 +444,7 @@ mod tests {
     #[test]
     fn decode_accepts_cobalt_asset_selector_at_v2() {
         let calldata = IB20Asset::uiMultiplierCall {}.abi_encode();
-        for version in [AssetVersion::V2, AssetVersion::V3] {
+        for version in [AssetVersion::V2, AssetVersion::V3, AssetVersion::V4] {
             assert!(matches!(
                 version.abi().decode(&calldata),
                 Ok(AssetCall::Asset(IB20Asset::IB20AssetCalls::uiMultiplier(_)))
@@ -387,7 +455,7 @@ mod tests {
     #[test]
     fn decode_accepts_common_selector_at_both_versions() {
         let calldata = IB20::nameCall {}.abi_encode();
-        for version in [AssetVersion::V1, AssetVersion::V2, AssetVersion::V3] {
+        for version in [AssetVersion::V1, AssetVersion::V2, AssetVersion::V3, AssetVersion::V4] {
             assert!(matches!(
                 version.abi().decode(&calldata),
                 Ok(AssetCall::Common(IB20::IB20Calls::name(_)))
@@ -407,9 +475,10 @@ mod tests {
                 ..
             } if selector == IB20::transferCall::SELECTOR
         ));
-        // Same bytes at V2/V3: common V1 and V2 declare the same surface today, and V3 reuses V2.
+        // Same bytes at V2/V3/V4: common V1 and V2 declare the same surface today, and V3/V4 reuse V2.
         assert_eq!(AssetVersion::V2.abi().decode(&calldata), Err(err.clone()));
-        assert_eq!(AssetVersion::V3.abi().decode(&calldata), Err(err));
+        assert_eq!(AssetVersion::V3.abi().decode(&calldata), Err(err.clone()));
+        assert_eq!(AssetVersion::V4.abi().decode(&calldata), Err(err));
     }
 
     #[test]
@@ -440,6 +509,10 @@ mod tests {
         );
         assert_eq!(
             AssetVersion::V3.abi().decode(&calldata),
+            Err(BasePrecompileError::UnknownFunctionSelector(calldata))
+        );
+        assert_eq!(
+            AssetVersion::V4.abi().decode(&calldata),
             Err(BasePrecompileError::UnknownFunctionSelector(calldata))
         );
     }
