@@ -1,15 +1,16 @@
 //! Golden tests pinning Asset **V4** behavior of the B-20 precompile.
 //!
-//! V4 activates at Everest and is a copy of V3. Its roots are pinned independently so a future
-//! edit that alters V4 must re-bless these roots. These goldens run production Cobalt storage
-//! features (Everest inherits them via `upgrade >= Cobalt`) while the V1 suite runs Legacy, so a
-//! root matches V2's only when the operation does not diverge; ops that write shrinking dynamic
-//! values can legitimately diverge from V1's Legacy pin.
+//! V4 activates at Everest and is V3 minus the deprecated `MultiplierUpdated` event from
+//! `updateMultiplier`. Its roots are pinned independently so a future edit that alters V4 must
+//! re-bless these roots. These goldens run production Cobalt storage features (Everest inherits
+//! them via `upgrade >= Cobalt`) while the V1 suite runs Legacy, so a root matches V2's only when the
+//! operation does not diverge; ops that write shrinking dynamic values can legitimately diverge from
+//! V1's Legacy pin.
 //!
 //! Every op is driven through the **version-resolver-gated** dispatch path
-//! (`BaseUpgrade::Denim` -> `AssetVersion::V3`) against the real EVM-backed `B20AssetStorage`
+//! (`BaseUpgrade::Everest` -> `AssetVersion::V4`) against the real EVM-backed `B20AssetStorage`
 //! over `HashMapStorageProvider` configured with `StorageFeatures::Cobalt` (the production
-//! storage config at Denim), with a `FakePolicyAccounting` for deterministic allow/block
+//! storage config at Everest), with a `FakePolicyAccounting` for deterministic allow/block
 //! decisions. Each case asserts:
 //!   1. exact returned ABI bytes (or the typed revert),
 //!   2. resulting state (balances / supply / roles / allowances / multiplier / metadata / storage),
@@ -125,10 +126,10 @@ const ROOT_GRANT_IDEMPOTENT: B256 =
 // Genuinely new at V2, or diverging from V1's pinned behavior (updateMultiplier's event changed;
 // announce's inner updateMultiplier call therefore emits a different event too).
 
-const ROOT_UPDATE_MULTIPLIER_V2: B256 =
-    b256!("fedb235aa7953b3224856747a42ef936f814559763791f14126249a05f5f9a6b");
+const ROOT_UPDATE_MULTIPLIER_V4: B256 =
+    b256!("cdca2ecf6bb16df905c24e19fe2a6134de85d14f78fada504f297a5b48f27d56");
 const ROOT_UPDATE_MULTIPLIER_CLEARS_PENDING: B256 =
-    b256!("1bcd7dd7a84d36e144d3f9a4547acda2eb80f6622ed7eec9a8cd6ad3a021f0ba");
+    b256!("b690cfd07315d9382062f430bff1a37c1ffaeab678cebb316072ed3c427144be");
 const ROOT_UPDATE_UI_MULTIPLIER: B256 =
     b256!("45900c3ea027f3f8b2943b15ce566961186a69b2b0ce8b0f4a1578cad75f6ee9");
 const ROOT_UPDATE_UI_MULTIPLIER_FOLDS_MATURED: B256 =
@@ -136,15 +137,15 @@ const ROOT_UPDATE_UI_MULTIPLIER_FOLDS_MATURED: B256 =
 const ROOT_CANCEL_UI_MULTIPLIER_UPDATE: B256 =
     b256!("7473a102f829e2eeea1b73c3458a4b88422d022a8faea4189ac91cb20793a81c");
 const ROOT_SEIZE: B256 = b256!("1aba53dba437cfde3f7938c1d4c02cce8c3df5b629dfa49637edaac20e052a6a");
-const ROOT_ANNOUNCE_V2: B256 =
-    b256!("5b3ea1fe17f441ce9e5d82f0764ce177f818fad8118cd1358fe74cbfafcde5e1");
+const ROOT_ANNOUNCE_V4: B256 =
+    b256!("95f6bf76e456a189578b72be4ddeeb03cabb2fca86b1c292195305d5e1a6d092");
 
 // --- harness ----------------------------------------------------------------
 
 /// Fresh provider with an initialized `Base Asset` at [`TOKEN`], matching the factory
 /// bootstrap: the multiplier slot is left physically zero and the getter normalizes it to WAD.
 fn fresh() -> HashMapStorageProvider {
-    let mut storage = storage_at(BaseUpgrade::Denim);
+    let mut storage = storage_at(BaseUpgrade::Everest);
     StorageCtx::enter(&mut storage, |ctx| {
         let mut token = B20AssetStorage::from_address(TOKEN, ctx);
         token
@@ -2359,7 +2360,7 @@ fn golden_update_extra_metadata_unprivileged_requires_role() {
 }
 
 // ============================================================================
-// updateMultiplier (V2 semantics: emits UIMultiplierUpdated; clears a live pending)
+// updateMultiplier (V4 semantics: emits only UIMultiplierUpdated; clears a live pending)
 // ============================================================================
 
 // Guards `fresh()` against drifting back to a physical-WAD prestate: a factory-bootstrapped
@@ -2387,8 +2388,9 @@ fn golden_update_multiplier_emits_ui_multiplier_updated() {
     .unwrap();
     assert!(out.is_empty());
     read(&mut s, |t| assert_eq!(t.multiplier().unwrap(), B20AssetStorage::WAD * u(2)));
+    let events = s.get_events(TOKEN);
     assert_eq!(
-        *s.get_events(TOKEN).last().unwrap(),
+        *events.last().unwrap(),
         IB20Asset::UIMultiplierUpdated {
             oldMultiplier: B20AssetStorage::WAD,
             newMultiplier: B20AssetStorage::WAD * u(2),
@@ -2396,7 +2398,53 @@ fn golden_update_multiplier_emits_ui_multiplier_updated() {
         }
         .encode_log_data()
     );
-    assert_root("update_multiplier_v2", s, ROOT_UPDATE_MULTIPLIER_V2);
+    assert!(
+        !events.iter().any(|log| log.topics()[0] == IB20Asset::MultiplierUpdated::SIGNATURE_HASH),
+        "V4 must not emit the deprecated MultiplierUpdated event"
+    );
+    assert_root("update_multiplier_v4", s, ROOT_UPDATE_MULTIPLIER_V4);
+}
+
+#[test]
+fn golden_update_multiplier_drops_deprecated_event_only_at_everest() {
+    let run = |upgrade: BaseUpgrade| {
+        let mut s = storage_at(upgrade);
+        StorageCtx::enter(&mut s, |ctx| {
+            let mut token = B20AssetStorage::from_address(TOKEN, ctx);
+            token
+                .initialize(B20AssetInit {
+                    name: NAME.into(),
+                    symbol: SYMBOL.into(),
+                    supply_cap: B20_MAX_SUPPLY_CAP,
+                    multiplier: U256::ZERO,
+                    decimals: DECIMALS,
+                })
+                .expect("initialize asset");
+            give_role(&mut token, operator_role(), ALICE);
+        });
+        warp(&mut s, U256::ZERO);
+        s.set_caller(ALICE);
+        let calldata =
+            IB20Asset::updateMultiplierCall { newMultiplier: B20AssetStorage::WAD * u(2) }
+                .abi_encode();
+        let version = AssetVersions::from_base_upgrade(upgrade).expect("active version");
+        StorageCtx::enter(&mut s, |ctx| {
+            token(ctx, FakePolicyAccounting::new())
+                .route(ctx, &calldata, version, false, NoopPrecompileCallObserver)
+                .unwrap();
+        });
+        s.get_events(TOKEN).clone()
+    };
+
+    let denim = run(BaseUpgrade::Denim);
+    let everest = run(BaseUpgrade::Everest);
+    let deprecated = IB20Asset::MultiplierUpdated::SIGNATURE_HASH;
+    assert_eq!(denim.len(), everest.len() + 1);
+    assert_eq!(denim.iter().filter(|log| log.topics()[0] == deprecated).count(), 1);
+    assert_eq!(everest.iter().filter(|log| log.topics()[0] == deprecated).count(), 0);
+    let denim_without_deprecated: Vec<_> =
+        denim.into_iter().filter(|log| log.topics()[0] != deprecated).collect();
+    assert_eq!(denim_without_deprecated, everest);
 }
 
 #[test]
@@ -2465,16 +2513,12 @@ fn golden_update_multiplier_clears_live_pending_and_emits_cancellation() {
     });
     let events = s.get_events(TOKEN);
     assert_eq!(
-        events[events.len() - 3],
+        events[events.len() - 2],
         IB20Asset::UIMultiplierUpdateCancelled {
             cancelledMultiplier: B20AssetStorage::WAD * u(3),
             cancelledEffectiveAt: u(1_000),
         }
         .encode_log_data()
-    );
-    assert_eq!(
-        events[events.len() - 2],
-        IB20Asset::MultiplierUpdated { multiplier: B20AssetStorage::WAD * u(5) }.encode_log_data()
     );
     assert_eq!(
         events[events.len() - 1],
@@ -2484,6 +2528,10 @@ fn golden_update_multiplier_clears_live_pending_and_emits_cancellation() {
             effectiveAtTimestamp: u(1),
         }
         .encode_log_data()
+    );
+    assert!(
+        !events.iter().any(|log| log.topics()[0] == IB20Asset::MultiplierUpdated::SIGNATURE_HASH),
+        "V4 must not emit the deprecated MultiplierUpdated event"
     );
     assert_root("update_multiplier_clears_pending", s, ROOT_UPDATE_MULTIPLIER_CLEARS_PENDING);
 }
@@ -3036,7 +3084,7 @@ fn golden_max_ui_multiplier_returns_uint128_max() {
 }
 
 // ============================================================================
-// announce (V2 semantics: inner updateMultiplier now emits UIMultiplierUpdated)
+// announce (V4 semantics: inner updateMultiplier emits only UIMultiplierUpdated)
 // ============================================================================
 
 #[test]
@@ -3067,10 +3115,9 @@ fn golden_announce_emits_and_runs_internal_calls() {
         assert_eq!(t.multiplier().unwrap(), B20AssetStorage::WAD * u(2));
     });
     let events = s.get_events(TOKEN);
-    // Announcement, then the inner updateMultiplier's MultiplierUpdated + UIMultiplierUpdated,
-    // then EndAnnouncement.
+    // Announcement, then the inner updateMultiplier's UIMultiplierUpdated, then EndAnnouncement.
     assert_eq!(
-        events[events.len() - 4],
+        events[events.len() - 3],
         IB20Asset::Announcement {
             caller: ALICE,
             id: "2026-split".into(),
@@ -3079,7 +3126,6 @@ fn golden_announce_emits_and_runs_internal_calls() {
         }
         .encode_log_data()
     );
-    assert_eq!(events[events.len() - 3].topics()[0], IB20Asset::MultiplierUpdated::SIGNATURE_HASH);
     assert_eq!(
         events[events.len() - 2].topics()[0],
         IB20Asset::UIMultiplierUpdated::SIGNATURE_HASH
@@ -3088,7 +3134,11 @@ fn golden_announce_emits_and_runs_internal_calls() {
         *events.last().unwrap(),
         IB20Asset::EndAnnouncement { id: "2026-split".into() }.encode_log_data()
     );
-    assert_root("announce_v2", s, ROOT_ANNOUNCE_V2);
+    assert!(
+        !events.iter().any(|log| log.topics()[0] == IB20Asset::MultiplierUpdated::SIGNATURE_HASH),
+        "V4 must not emit the deprecated MultiplierUpdated event"
+    );
+    assert_root("announce_v4", s, ROOT_ANNOUNCE_V4);
 }
 
 #[test]
